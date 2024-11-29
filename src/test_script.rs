@@ -16,13 +16,13 @@ pub fn main() {
         CipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256,
         &au_privkey[..]
     ).unwrap();
-    println!("Ok");
+
     let mut bob: TsppSocket = TsppSocket::new(
         Version::Version1,
         CipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256,
         &au_privkey[..]
     ).unwrap();
-    println!("Ok");
+
     let mut buf: [u8; 1024] = [0; 1024];
 
     let (s, state): (usize, TsppState) = alice.hello_phase_send(&mut buf[..]).unwrap();

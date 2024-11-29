@@ -1,9 +1,9 @@
 [package]
-name = "cert"
+name = "tspp"
 version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-crypto = { version = "0.0.4", path = "../stable-packages/crypto-v0.0.4" }
+cryptopkg = { package = "crypto", version = "0.0.5", path = "../stable-packages/crypto-v0.0.5" }
 rand_core = { version = "*", features = ["getrandom"] }
 rand_chacha = "*"

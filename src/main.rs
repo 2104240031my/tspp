@@ -1,7 +1,4 @@
 #[allow(dead_code)]
-mod crypto;
-
-#[allow(dead_code)]
 mod net;
 
 mod test_script;

@@ -1,15 +1,15 @@
-use crypto::crypto::DiffieHellman;
-use crypto::crypto::DigitalSignature;
-use crypto::crypto::Hash as HashTrait;
-use crypto::crypto::ed25519::Ed25519;
-use crypto::crypto::sha3::Sha3256;
-use crypto::crypto::x25519::X25519;
+use cryptopkg::crypto::feature::Aead as AeadFeature;
+use cryptopkg::crypto::feature::DiffieHellman as DiffieHellmanFeature;
+use cryptopkg::crypto::feature::Hash as HashFeature;
+use cryptopkg::crypto::util::Hash;
+use cryptopkg::crypto::util::HashAlgorithm;
+use cryptopkg::crypto::aes_aead::Aes256Gcm;
+use cryptopkg::crypto::ed25519::Ed25519;
+use cryptopkg::crypto::x25519::X25519;
+use cryptopkg::crypto::sha3::Sha3256;
 use rand_core::RngCore;
 use rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use crate::crypto::aead::Aes256Gcm;
-use crate::crypto::hash::Hash;
-use crate::crypto::hash::HashAlgorithm;
 use crate::net::error::NetworkError;
 use crate::net::error::NetworkErrorCode;
 
@@ -22,7 +22,7 @@ pub struct TsppSocket {
     secrets: HelloSecrets,
     send_buf: [u8; BUF_LEN],
     recv_buf: [u8; BUF_LEN],
-    hash: Hash
+    hash: Option<Hash>
 }
 
 struct HelloSecrets {
@@ -32,7 +32,6 @@ struct HelloSecrets {
     au_privkey: [u8; 32]
 }
 
-#[derive(PartialEq)]
 pub enum TsppState {
     Initial,
     WaitHello,
@@ -86,6 +85,12 @@ impl Clone for TsppState {
 }
 
 impl Copy for TsppState {}
+
+impl PartialEq for TsppState {
+    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
+}
+
+impl Eq for TsppState {}
 
 impl TsppSocket {
 
@@ -551,7 +556,7 @@ impl HelloFragment {
                 let sign_input: [u8; 0] = [];
                 // msg := (au_signature以外のfrag)
 
-                if let Err(_) = X25519::compute_public_key(
+                if let Err(_) = X25519::compute_public_key_oneshot(
                     &secrets.ke_privkey[..secrets.ke_privkey_len],
                     &mut v.ke_pubkey[..c.ke_pubkey_len]
                 ) {
@@ -693,10 +698,10 @@ impl CipherSuite {
         };
     }
 
-    fn hash(&self) -> Hash {
+    fn hash(&self) -> Option<Hash> {
         return match self {
-            Self::NULL_NULL_NULL_NULL                 => Hash::new(HashAlgorithm::Null),
-            Self::X25519_Ed25519_AES_128_GCM_SHA3_256 => Hash::new(HashAlgorithm::Sha3256),
+            Self::NULL_NULL_NULL_NULL                 => None,
+            Self::X25519_Ed25519_AES_128_GCM_SHA3_256 => Some(Hash::new(HashAlgorithm::Sha3256)),
         };
     }
 
