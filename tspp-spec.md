@@ -79,6 +79,10 @@ HelloDone -------------->                                       // #
 
 // あるいは逆に、Secretを署名のInとすることは危険だったりするか...？（一方向性関数通してSubkeyとしてからにするか...？）
 
+
+
+// SignとかKDFとかのinputって長さ情報もあったほうがいいんかな...
+
 // # Ready to use UserStream fragment
 
 UserStream <=======================================> UserStream
@@ -91,7 +95,7 @@ Bye -------------------->
 
 HelloFragment.au_signatureのinput dataは、
 
-"NSPP Version 1 Acceptor Signature" + 0x80 + HashContext()
+"TSPPv1 acceptor signature" || 0x80 || Hash(messages)
 
 条件
 - 下層のプロトコルが双方向通信可能なストリーム指向プロトコルであること。
