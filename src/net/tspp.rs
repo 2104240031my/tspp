@@ -364,26 +364,20 @@ impl TsppSocket {
                 break;
             }
 
-            let fragment_len: usize = {
-                let f: usize = if i_len < FragmentHeader::BYTES_LEN + 0xffff + tag_len {
-                    i_len
-                } else {
-                    FragmentHeader::BYTES_LEN + 0xffff + tag_len
-                };
-                if o_len < f - (FragmentHeader::BYTES_LEN + tag_len) { o_len } else { f }
-            };
-            let payload_len: usize = fragment_len - (FragmentHeader::BYTES_LEN + tag_len);
-
             let hdr: FragmentHeader = FragmentHeader::make(&in_buf[i_off..])?;
             if hdr.frag_type != FragmentType::UserStream {
-
                 if hdr.frag_type == FragmentType::Bye {
                     read = read + self.recv_bye(&in_buf[i_off..])?;
                     break;
                 }
-
                 return Err(TsppError::new(TsppErrorCode::IllegalFragment));
+            }
 
+            let payload_len: usize = hdr.length as usize;
+            let fragment_len: usize = FragmentHeader::BYTES_LEN + payload_len + tag_len;
+
+            if i_len < fragment_len || o_len < payload_len {
+                break;
             }
 
             let i1: usize = i_off + FragmentHeader::BYTES_LEN;

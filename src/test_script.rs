@@ -91,6 +91,28 @@ pub fn main() {
 
 
 
+    let mut buf: [u8; 256] = [0; 256];
+    let mut w = 0;
+    let (_, w2) = alice.send("Alice's 2nd message.".as_bytes(), &mut buf[w..]).unwrap();
+    w += w2;
+    let (_, w3) = alice.send("Alice's 3rd message.".as_bytes(), &mut buf[w..]).unwrap();
+    w += w3;
+    let (_, w4) = alice.send("Alice's 4th message.".as_bytes(), &mut buf[w..]).unwrap();
+    w += w4;
+    let (_, w5) = alice.send("Alice's 5th message.".as_bytes(), &mut buf[w..]).unwrap();
+    w += w5;
+
+    printbytesln(&buf[..w]);
+    println!("{}", w);
+
+    let mut buf2: [u8; 256] = [0; 256];
+    let (_, w) = bob.recv(&buf[..w], &mut buf2[..]).unwrap();
+
+    printbytesln(&buf2[..w]);
+    println!("{}", std::str::from_utf8(&buf2[..w]).unwrap());
+    println!("{}", w);
+
+
 
     let mut buf: [u8; 256] = [0; 256];
     let w = alice.send_bye(&mut buf[..]).unwrap();
