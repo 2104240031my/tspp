@@ -26,6 +26,10 @@ pub enum TsppErrorCode {
     VersionUnmatched,
     CipherSuiteUnmatched,
     IllegalFragment,
+    UnknownAuPublicKey,
+    PeerAuthFailed,
+    AeadDecryptionFailed,
+    HelloPhaseVerificationFailed,
 
 }
 
@@ -52,7 +56,11 @@ impl TsppError {
         return self.crypto_err_code;
     }
 
-    pub fn from_crypto_error(err: CryptoError) -> Self {
+}
+
+impl From<CryptoError> for TsppError {
+
+    fn from(err: CryptoError) -> Self {
         return Self{
             err_code: TsppErrorCode::CryptoErrorOccurred,
             crypto_err_code: Some(err.err_code())
@@ -65,9 +73,9 @@ impl Display for TsppError {
 
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         return write!(f, "TsppError: {}", match &self.err_code {
-            TsppErrorCode::Unknown                 => "unknown",
-            TsppErrorCode::IllegalArgument         => "illegal argument",
-            TsppErrorCode::CryptoErrorOccurred     => match self.crypto_err_code.unwrap() {
+            TsppErrorCode::Unknown                   => "unknown",
+            TsppErrorCode::IllegalArgument           => "illegal argument",
+            TsppErrorCode::CryptoErrorOccurred       => match self.crypto_err_code.unwrap() {
                 CryptoErrorCode::Unknown                              => "CRYPTO - unknown",
                 CryptoErrorCode::IllegalArgument                      => "CRYPTO - illegal argument",
                 CryptoErrorCode::UnsupportedAlgorithm                 => "CRYPTO - unsupported algorithm",
@@ -76,20 +84,24 @@ impl Display for TsppError {
                 CryptoErrorCode::CounterOverwrapped                   => "CRYPTO - counter overwrapped",
                 CryptoErrorCode::VerificationFailed                   => "CRYPTO - verification failed",
             },
-            TsppErrorCode::UnsupportedAlgorithm    => "unsupported algorithm",
-            TsppErrorCode::UnsupportedCipherSuite  => "unsupported cipher suite",
-            TsppErrorCode::UnsupportedFragmentType => "unsupported fragment type",
-            TsppErrorCode::UnsupportedVersion      => "unsupported version",
-            TsppErrorCode::BufferLengthIncorrect   => "buffer length incorrect",
-            TsppErrorCode::BufferTooShort          => "buffer too short",
-            TsppErrorCode::IllegalCipherSuite      => "illegal cipher suite",
-            TsppErrorCode::VerificationFailed      => "verification failed",
-            TsppErrorCode::UserStreamIsNotReady    => "user stream is not ready",
-            TsppErrorCode::RecvByeFragment         => "recv bye fragment",
-            TsppErrorCode::UnsuitableState         => "unsuitable state",
-            TsppErrorCode::VersionUnmatched        => "version unmatched",
-            TsppErrorCode::CipherSuiteUnmatched    => "cipher suite unmatched",
-            TsppErrorCode::IllegalFragment         => "illegal fragment",
+            TsppErrorCode::UnsupportedAlgorithm      => "unsupported algorithm",
+            TsppErrorCode::UnsupportedCipherSuite    => "unsupported cipher suite",
+            TsppErrorCode::UnsupportedFragmentType   => "unsupported fragment type",
+            TsppErrorCode::UnsupportedVersion        => "unsupported version",
+            TsppErrorCode::BufferLengthIncorrect     => "buffer length incorrect",
+            TsppErrorCode::BufferTooShort            => "buffer too short",
+            TsppErrorCode::IllegalCipherSuite        => "illegal cipher suite",
+            TsppErrorCode::VerificationFailed        => "verification failed",
+            TsppErrorCode::UserStreamIsNotReady      => "user stream is not ready",
+            TsppErrorCode::RecvByeFragment           => "recv bye fragment",
+            TsppErrorCode::UnsuitableState           => "unsuitable state",
+            TsppErrorCode::VersionUnmatched          => "version unmatched",
+            TsppErrorCode::CipherSuiteUnmatched      => "cipher suite unmatched",
+            TsppErrorCode::IllegalFragment           => "illegal fragment",
+            TsppErrorCode::UnknownAuPublicKey        => "unknown au public key",
+            TsppErrorCode::PeerAuthFailed            => "peer authentication failed",
+            TsppErrorCode::AeadDecryptionFailed => "aead decryption failed",
+            TsppErrorCode::HelloPhaseVerificationFailed => "hello phase verification failed",
         });
     }
 

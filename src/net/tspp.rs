@@ -1,14 +1,13 @@
 use cryptopkg::crypto::feature::Aead as AeadFeature;
 use cryptopkg::crypto::feature::DiffieHellman as DiffieHellmanFeature;
+use cryptopkg::crypto::feature::DigitalSignatureSigner as DigitalSignatureSignerFeature;
+use cryptopkg::crypto::feature::DigitalSignatureVerifier as DigitalSignatureVerifierFeature;
 use cryptopkg::crypto::feature::Hash as HashFeature;
 use cryptopkg::crypto::feature::Mac as MacFeature;
-use cryptopkg::crypto::util::Aead;
-use cryptopkg::crypto::util::AeadAlgorithm;
-use cryptopkg::crypto::util::Hash;
-use cryptopkg::crypto::util::HashAlgorithm;
-use cryptopkg::crypto::util::DigitalSignatureAlgorithm;
 use cryptopkg::crypto::aes_aead::Aes128Gcm;
 use cryptopkg::crypto::ed25519::Ed25519;
+use cryptopkg::crypto::ed25519::Ed25519Signer;
+use cryptopkg::crypto::ed25519::Ed25519Verifier;
 use cryptopkg::crypto::hmac_sha3::HmacSha3256;
 use cryptopkg::crypto::sha3::Sha3256;
 use cryptopkg::crypto::x25519::X25519;
@@ -18,17 +17,29 @@ use rand_chacha::ChaCha20Rng;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use crate::net::crypto::Aead;
+use crate::net::crypto::AeadAlgorithm;
+use crate::net::crypto::DiffieHellmanAlgorithm;
+use crate::net::crypto::DigitalSignatureAlgorithm;
+use crate::net::crypto::DigitalSignatureSigner;
+use crate::net::crypto::DigitalSignatureVerifier;
+use crate::net::crypto::Hash;
+use crate::net::crypto::HashAlgorithm;
+use crate::net::crypto::constant_time_eq;
 use crate::net::error::TsppError;
 use crate::net::error::TsppErrorCode;
 
 const BUF_LEN: usize = 0;
 
-const MAX_KE_PRIVATE_KEY_LEN: usize = X25519::PRIVATE_KEY_LEN;
-const MAX_KE_PUBLIC_KEY_LEN: usize  = X25519::PUBLIC_KEY_LEN;
-const MAX_CURRENT_SECRET_LEN: usize = HmacSha3256::MAC_LEN;
-const MAX_AU_PRIVATE_KEY_LEN: usize = Ed25519::PRIVATE_KEY_LEN;
-const MAX_AU_PUBLIC_KEY_LEN: usize  = Ed25519::PUBLIC_KEY_LEN;
-const MAX_MESSAGE_DIGEST_LEN: usize = Sha3256::MESSAGE_DIGEST_LEN;
+const MAX_KE_PRIVATE_KEY_LEN: usize      = X25519::PRIVATE_KEY_LEN;
+const MAX_KE_PUBLIC_KEY_LEN: usize       = X25519::PUBLIC_KEY_LEN;
+const MAX_CURRENT_SECRET_LEN: usize      = HmacSha3256::MAC_LEN;
+const MAX_AU_PRIVATE_KEY_LEN: usize      = Ed25519::PRIVATE_KEY_LEN;
+const MAX_AU_PUBLIC_KEY_LEN: usize       = Ed25519::PUBLIC_KEY_LEN;
+const MAX_AEAD_KEY_LEN: usize            = Aes128Gcm::KEY_LEN;
+const MAX_AEAD_NONCE_LEN: usize          = Aes128Gcm::MAX_NONCE_LEN;
+const MAX_AEAD_TAG_LEN: usize            = Aes128Gcm::TAG_LEN;
+const MAX_HASH_MESSAGE_DIGEST_LEN: usize = Sha3256::MESSAGE_DIGEST_LEN;
 
 pub struct TsppSocket {
     state: TsppState,
@@ -134,7 +145,7 @@ impl PartialEq for TsppState {
 
 impl Eq for TsppState {}
 
-static engine: LazyLock<Mutex<TsppEngine>> = LazyLock::new(|| Mutex::new(TsppEngine::new()));
+static ENGINE: LazyLock<Mutex<TsppEngine>> = LazyLock::new(|| Mutex::new(TsppEngine::new()));
 
 pub struct TsppEngine {
     inner: HashMap<(usize, Vec<u8>), Vec<u8>>
@@ -147,11 +158,11 @@ impl TsppEngine {
     }
 
     pub fn insert_known_peer_auth_public_key(algo: DigitalSignatureAlgorithm, pubkey: &[u8]) {
-        engine.lock().unwrap().inner.insert((algo as usize, pubkey.to_vec()), pubkey.to_vec());
+        ENGINE.lock().unwrap().inner.insert((algo as usize, pubkey.to_vec()), pubkey.to_vec());
     }
 
     pub fn is_known_peer_auth_public_key(algo: DigitalSignatureAlgorithm, pubkey: &[u8]) -> bool {
-        return match engine.lock().unwrap().inner.get(&(algo as usize, pubkey.to_vec())) {
+        return match ENGINE.lock().unwrap().inner.get(&(algo as usize, pubkey.to_vec())) {
             Some(v) => v.as_slice() == pubkey,
             None    => false
         };
@@ -212,7 +223,7 @@ impl TsppSocket {
             TsppRole::PassiveOpener => match self.state {
                 TsppState::HelloRecvd     => {
                     let (s, state): (usize, TsppState) = self.send_hello(buf)?;
-
+                    self.set_hello_phase_secret()?;
                     Ok((s, state))
                 },
                 TsppState::HelloSent      => self.send_hello_done(buf),
@@ -222,12 +233,12 @@ impl TsppSocket {
         };
     }
 
-    pub fn hello_phase_recv(&mut self, buf: &[u8]) -> Result<(usize, TsppState), TsppError> {
+    pub fn hello_phase_recv(&mut self, buf: &mut [u8]) -> Result<(usize, TsppState), TsppError> {
         return match self.role {
             TsppRole::ActiveOpener => match self.state {
                 TsppState::HelloSent      => {
                     let (r, state): (usize, TsppState) = self.recv_hello(buf)?;
-
+                    self.set_hello_phase_secret()?;
                     Ok((r, state))
                 },
                 TsppState::HelloRecvd     => self.recv_hello_done(buf),
@@ -243,23 +254,134 @@ impl TsppSocket {
         };
     }
 
-    pub fn send(&mut self, in_buf: &[u8], out_buf: &mut [u8]) -> Result<usize, TsppError> {
+    pub fn send(&mut self, in_buf: &[u8], out_buf: &mut [u8]) -> Result<(usize, usize), TsppError> {
 
-        if self.state.can_send_user_stream() {
+        if !self.state.can_send_user_stream() {
             return Err(TsppError::new(TsppErrorCode::UserStreamIsNotReady));
         }
 
-        return Ok(0);
+        let tag_len: usize = self.cipher_suite.constants().aead_tag_len;
+
+        let mut i_off: usize = 0;
+        let mut o_off: usize = 0;
+        let i_cap: usize = in_buf.len();
+        let o_cap: usize = out_buf.len();
+        let mut read: usize = 0;
+        let mut written: usize = 0;
+        loop {
+
+            let i_len: usize = i_cap - i_off;
+            let o_len: usize = o_cap - o_off;
+
+            if i_len == 0 || o_len == 0 {
+                break;
+            }
+
+            if o_len < FragmentHeader::BYTES_LEN + tag_len {
+                break;
+            }
+
+            let payload_len: usize = {
+                let p: usize = if i_len < 0xffff { i_len } else { 0xffff };
+                if o_len < FragmentHeader::BYTES_LEN + p + tag_len { o_len } else { p }
+            };
+            let fragment_len: usize = FragmentHeader::BYTES_LEN + payload_len + tag_len;
+
+            let mut hdr: [u8; FragmentHeader::BYTES_LEN] = [0; FragmentHeader::BYTES_LEN];
+            FragmentHeader::make_bytes_into(FragmentType::UserStream, 0x00, payload_len, &mut hdr[..])?;
+
+            let o1: usize = o_off + FragmentHeader::BYTES_LEN;
+            let o2: usize = o1 + payload_len;
+            let o3: usize = o2 + tag_len;
+
+            let mut tag: [u8; MAX_AEAD_TAG_LEN] = [0; MAX_AEAD_TAG_LEN];
+            self.aead_seal(
+                &hdr[..],
+                &in_buf[i_off..(i_off + payload_len)],
+                &mut out_buf[o1..o2],
+                &mut tag[..tag_len]
+            )?;
+
+            out_buf[o_off..o1].copy_from_slice(&hdr[..]);
+            out_buf[o2..o3].copy_from_slice(&tag[..tag_len]);
+
+            i_off = i_off + payload_len;
+            o_off = o_off + fragment_len;
+
+            read = read + payload_len;
+            written = written + fragment_len;
+
+        }
+
+        return Ok((read, written));
 
     }
 
-    pub fn recv(&mut self, in_buf: &[u8], out_buf: &mut [u8]) -> Result<usize, TsppError> {
+    pub fn recv(&mut self, in_buf: &[u8], out_buf: &mut [u8]) -> Result<(usize, usize), TsppError> {
 
-        if self.state.can_recv_user_stream() {
+        if !self.state.can_recv_user_stream() {
             return Err(TsppError::new(TsppErrorCode::UserStreamIsNotReady));
         }
 
-        return Ok(0);
+        let tag_len: usize = self.cipher_suite.constants().aead_tag_len;
+
+        let mut i_off: usize = 0;
+        let mut o_off: usize = 0;
+        let i_cap: usize = in_buf.len();
+        let o_cap: usize = out_buf.len();
+        let mut read: usize = 0;
+        let mut written: usize = 0;
+        loop {
+
+            let i_len: usize = i_cap - i_off;
+            let o_len: usize = o_cap - o_off;
+
+            if i_len == 0 || o_len == 0 {
+                break;
+            }
+
+            if i_len < FragmentHeader::BYTES_LEN + tag_len {
+                break;
+            }
+
+            let fragment_len: usize = {
+                let f: usize = if i_len < FragmentHeader::BYTES_LEN + 0xffff + tag_len {
+                    i_len
+                } else {
+                    FragmentHeader::BYTES_LEN + 0xffff + tag_len
+                };
+                if o_len < f - (FragmentHeader::BYTES_LEN + tag_len) { o_len } else { f }
+            };
+            let payload_len: usize = fragment_len - (FragmentHeader::BYTES_LEN + tag_len);
+
+            let hdr: FragmentHeader = FragmentHeader::make(&in_buf[i_off..])?;
+            if hdr.frag_type != FragmentType::UserStream {
+                return Err(TsppError::new(TsppErrorCode::IllegalFragment));
+            }
+
+            let i1: usize = i_off + FragmentHeader::BYTES_LEN;
+            let i2: usize = i1 + payload_len;
+
+            match self.aead_open(
+                &in_buf[i_off..i1],
+                &in_buf[i1..i2],
+                &mut out_buf[o_off..(o_off + payload_len)],
+                &in_buf[i2..(i2 + tag_len)]
+            ) {
+                // ERROR!: must be send by or finish stream
+                Ok(v)  => if !v { return Err(TsppError::new(TsppErrorCode::AeadDecryptionFailed)); },
+                Err(_) => return Err(TsppError::new(TsppErrorCode::AeadDecryptionFailed))
+            };
+
+            i_off = i_off + fragment_len;
+            o_off = o_off + payload_len;
+
+            read = read + fragment_len;
+            written = written + payload_len;
+
+        }
+
+        return Ok((read, written));
 
     }
 
@@ -285,19 +407,19 @@ impl TsppSocket {
 
         let c: CipherSuiteConstants = self.cipher_suite.constants();
         let s: usize =
-            FragmentBaseFields::BYTES_NUM +
-            TsppVersion::BYTES_NUM +
-            TsppCipherSuite::BYTES_NUM +
+            FragmentHeader::BYTES_LEN +
+            TsppVersion::BYTES_LEN +
+            TsppCipherSuite::BYTES_LEN +
             64 +
             c.ke_pubkey_len +
             c.au_pubkey_len +
             c.au_signature_len;
 
         let mut frag: HelloFragment = HelloFragment{
-            base: FragmentBaseFields{
+            base: FragmentHeader{
                 frag_type: FragmentType::Hello,
                 reserved: 0x00,
-                length: (s - FragmentBaseFields::BYTES_NUM) as u16
+                length: (s - FragmentHeader::BYTES_LEN) as u16
             },
             version: self.version,
             cipher_suite: self.cipher_suite,
@@ -318,13 +440,15 @@ impl TsppSocket {
                     return Err(TsppError::new(TsppErrorCode::BufferLengthIncorrect));
                 }
 
-                X25519::compute_public_key_oneshot(&self.ke_privkey_buf[..X25519::PRIVATE_KEY_LEN],
-                    &mut frag.ke_pubkey[..X25519::PUBLIC_KEY_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                X25519::compute_public_key_oneshot(
+                    &self.ke_privkey_buf[..X25519::PRIVATE_KEY_LEN],
+                    &mut frag.ke_pubkey[..X25519::PUBLIC_KEY_LEN]
+                )?;
 
-                Ed25519::compute_public_key_oneshot(&self.au_privkey_buf[..Ed25519::PRIVATE_KEY_LEN],
-                    &mut frag.au_pubkey[..Ed25519::PUBLIC_KEY_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                Ed25519Signer::compute_public_key_oneshot(
+                    &self.au_privkey_buf[..Ed25519::PRIVATE_KEY_LEN],
+                    &mut frag.au_pubkey[..Ed25519::PUBLIC_KEY_LEN]
+                )?;
 
                 let mut fb: [u8; 208] = [0; 208];
                 frag.to_bytes(&mut fb[..])?;
@@ -343,19 +467,15 @@ impl TsppSocket {
                     }
                 }
 
-                self.context_hash
-                    .update(&fb[..f])
-                    .map_err(TsppError::from_crypto_error)?
-                    .digest(&mut m[32..])
-                    .map_err(TsppError::from_crypto_error)?;
+                self.context_hash.update(&fb[..f])?.digest(&mut m[32..])?;
 
-                Ed25519::sign_oneshot(&self.au_privkey_buf[..Ed25519::PRIVATE_KEY_LEN], &m[..],
-                    &mut frag.au_signature[..Ed25519::SIGNATURE_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                Ed25519Signer::sign_oneshot(
+                    &self.au_privkey_buf[..Ed25519::PRIVATE_KEY_LEN],
+                    &m[..],
+                    &mut frag.au_signature[..Ed25519::SIGNATURE_LEN]
+                )?;
 
-                self.context_hash
-                    .update(&frag.au_signature[..Ed25519::SIGNATURE_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                self.context_hash.update(&frag.au_signature[..Ed25519::SIGNATURE_LEN])?;
 
             },
             _ => return Err(TsppError::new(TsppErrorCode::IllegalCipherSuite))
@@ -364,7 +484,6 @@ impl TsppSocket {
         frag.to_bytes(&mut buf[..])?;
 
         self.state = TsppState::HelloSent;
-
         return Ok((s, self.state));
 
     }
@@ -392,20 +511,22 @@ impl TsppSocket {
         let c: CipherSuiteConstants = self.cipher_suite.constants();
         let r: usize = f.len();
 
-        self.context_hash
-            .update(&buf[..(r - c.au_signature_len)])
-            .map_err(TsppError::from_crypto_error)?;
+        self.context_hash.update(&buf[..(r - c.au_signature_len)])?;
 
         match self.cipher_suite {
             TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
 
-                let v = TsppEngine::is_known_peer_auth_public_key(
+                if f.base.length as usize != 76 + X25519::PUBLIC_KEY_LEN + Ed25519::PUBLIC_KEY_LEN + Ed25519::SIGNATURE_LEN {
+                    return Err(TsppError::new(TsppErrorCode::IllegalFragment));
+                }
+
+                if !TsppEngine::is_known_peer_auth_public_key(
                     DigitalSignatureAlgorithm::Ed25519,
                     &f.au_pubkey[..Ed25519::PUBLIC_KEY_LEN]
-                );
-
-                // error handle
-                println!("{}", v);
+                ) {
+                    // ERROR!: must be send by or finish stream
+                    return Err(TsppError::new(TsppErrorCode::UnknownAuPublicKey));
+                };
 
                 let mut b: [u8; 32 + Sha3256::MESSAGE_DIGEST_LEN] = [0; 32 + Sha3256::MESSAGE_DIGEST_LEN];
                 match self.role {
@@ -420,49 +541,33 @@ impl TsppSocket {
                     }
                 }
 
-                self.context_hash
-                    .digest(&mut b[32..])
-                    .map_err(TsppError::from_crypto_error)?;
+                self.context_hash.digest(&mut b[32..])?;
 
-                for i in &buf[(r - Ed25519::SIGNATURE_LEN)..r] {
-                    print!("{:02x}", i);
+                if !Ed25519Verifier::verify_oneshot(
+                    &f.au_pubkey[..Ed25519::PUBLIC_KEY_LEN],
+                    &b[..],
+                    &buf[(r - Ed25519::SIGNATURE_LEN)..r]
+                )? {
+                    // ERROR!: must be send by or finish stream
+                    return Err(TsppError::new(TsppErrorCode::PeerAuthFailed));
                 }
-                println!();
-                for i in 0..b.len() {
-                    print!("{:02x}", b[i]);
-                }
-                println!();
-
-                let v: bool = Ed25519::verify_oneshot(&f.au_pubkey[..Ed25519::PUBLIC_KEY_LEN], &b[..],
-                    &buf[(r - Ed25519::SIGNATURE_LEN)..r])
-                    .map_err(TsppError::from_crypto_error)?;
-
-                // error handle
-                println!("{}", v);
 
                 let mut s: [u8; X25519::SHARED_SECRET_LEN] = [0; X25519::SHARED_SECRET_LEN];
-                X25519::compute_shared_secret_oneshot(&self.ke_privkey_buf[..X25519::PRIVATE_KEY_LEN],
-                    &f.ke_pubkey[..X25519::PUBLIC_KEY_LEN], &mut s[..])
-                    .map_err(TsppError::from_crypto_error)?;
+                X25519::compute_shared_secret_oneshot(
+                    &self.ke_privkey_buf[..X25519::PRIVATE_KEY_LEN],
+                    &f.ke_pubkey[..X25519::PUBLIC_KEY_LEN],
+                    &mut s[..]
+                )?;
 
-                Sha3256::digest_oneshot(&s[..], &mut self.secret_buf[..HmacSha3256::MAC_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
-
-                for i in &self.secret_buf[..c.current_secret_len] {
-                    print!("{:02x}", i);
-                }
-                println!();
+                Sha3256::digest_oneshot(&s[..], &mut self.secret_buf[..HmacSha3256::MAC_LEN])?;
 
             },
             _ => return Err(TsppError::new(TsppErrorCode::IllegalCipherSuite))
         }
 
-        self.context_hash
-            .update(&buf[(r - c.au_signature_len)..r])
-            .map_err(TsppError::from_crypto_error)?;
+        self.context_hash.update(&buf[(r - c.au_signature_len)..r])?;
 
         self.state = TsppState::HelloRecvd;
-
         return Ok((r, self.state));
 
     }
@@ -473,52 +578,128 @@ impl TsppSocket {
             return Err(TsppError::new(TsppErrorCode::UnsuitableState));
         }
 
-        let c: CipherSuiteConstants = self.cipher_suite.constants();
-        let s: usize = FragmentBaseFields::BYTES_NUM + c.hash_msg_dgst_len;
-
-        let mut frag: HelloDoneFragment = HelloDoneFragment{
-            base: FragmentBaseFields{
-                frag_type: FragmentType::HelloDone,
-                reserved: 0x00,
-                length: (s - FragmentBaseFields::BYTES_NUM) as u16
-            },
-            hello_phase_vrf_mac: [0; MAX_MESSAGE_DIGEST_LEN]
-        };
-
-        match self.cipher_suite {
+        let s: usize = match self.cipher_suite {
             TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
 
+                let s: usize = FragmentHeader::BYTES_LEN + HmacSha3256::MAC_LEN + Aes128Gcm::TAG_LEN;
+
+                let hdr: [u8; FragmentHeader::BYTES_LEN] = FragmentHeader::make_bytes(
+                    FragmentType::HelloDone,
+                    0x00,
+                    HmacSha3256::MAC_LEN
+                )?;
+
                 let mut k: [u8; HmacSha3256::MAC_LEN] = [0; HmacSha3256::MAC_LEN];
-                HmacSha3256::compute_oneshot(&self.secret_buf[..HmacSha3256::MAC_LEN],
-                    "TSPPv1 hello phase vrf mac key".as_bytes(), &mut k[..])
-                    .map_err(TsppError::from_crypto_error)?;
+                HmacSha3256::compute_oneshot(
+                    &self.secret_buf[..HmacSha3256::MAC_LEN],
+                    "TSPPv1 hello phase vrf mac key".as_bytes(),
+                    &mut k[..]
+                )?;
 
                 let mut d: [u8; Sha3256::MESSAGE_DIGEST_LEN] = [0; Sha3256::MESSAGE_DIGEST_LEN];
-                self.context_hash.digest(&mut d[..]).map_err(TsppError::from_crypto_error)?;
+                self.context_hash.digest(&mut d[..])?;
 
-                HmacSha3256::compute_oneshot(&k[..], &d[..],
-                    &mut frag.hello_phase_vrf_mac[..HmacSha3256::MAC_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                let mut mac: [u8; HmacSha3256::MAC_LEN] = [0; HmacSha3256::MAC_LEN];
+                HmacSha3256::compute_oneshot(&k[..], &d[..], &mut mac[..])?;
+
+                self.context_hash.update(&hdr[..])?.update(&mac[..])?;
+
+                let mut tag: [u8; Aes128Gcm::TAG_LEN] = [0; Aes128Gcm::TAG_LEN];
+                self.aead_seal(
+                    &hdr[..],
+                    &mac[..],
+                    &mut buf[FragmentHeader::BYTES_LEN..(FragmentHeader::BYTES_LEN + HmacSha3256::MAC_LEN)],
+                    &mut tag[..]
+                )?;
+
+                buf[..FragmentHeader::BYTES_LEN].copy_from_slice(&hdr[..]);
+                buf[(s - Aes128Gcm::TAG_LEN)..s].copy_from_slice(&tag[..]);
+
+                s
 
             },
             _ => return Err(TsppError::new(TsppErrorCode::IllegalCipherSuite))
-        }
+        };
 
-        frag.to_bytes(&mut buf[..])?;
-
-        self.state = TsppState::HelloDoneSent;
-
+        self.state = match self.role {
+            TsppRole::ActiveOpener  => TsppState::BidiUserStream,
+            TsppRole::PassiveOpener => TsppState::HelloDoneSent
+        };
         return Ok((s, self.state));
 
     }
 
-    fn recv_hello_done(&mut self, buf: &[u8]) -> Result<(usize, TsppState), TsppError> {
+    fn recv_hello_done(&mut self, buf: &mut [u8]) -> Result<(usize, TsppState), TsppError> {
 
-        // let h: HelloDoneFragment = HelloDoneFragment::from_bytes(buf)?;
+        if !self.state.can_recv_hello_done(self.role) {
+            return Err(TsppError::new(TsppErrorCode::UnsuitableState));
+        }
 
-        self.state = TsppState::HelloDoneRecvd;
+        let hdr: FragmentHeader = FragmentHeader::make(&buf[..])?;
+        if hdr.frag_type != FragmentType::HelloDone {
+            return Err(TsppError::new(TsppErrorCode::IllegalFragment));
+        }
 
-        return Ok((0, self.state));
+        let r: usize = match self.cipher_suite {
+            TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
+
+                let r: usize = FragmentHeader::BYTES_LEN + HmacSha3256::MAC_LEN + Aes128Gcm::TAG_LEN;
+                if buf.len() < r {
+                    return Err(TsppError::new(TsppErrorCode::BufferTooShort));
+                }
+
+                if hdr.length as usize != HmacSha3256::MAC_LEN {
+                    return Err(TsppError::new(TsppErrorCode::IllegalFragment));
+                }
+
+                let mut mac: [u8; HmacSha3256::MAC_LEN] = [0; HmacSha3256::MAC_LEN];
+
+                match self.aead_open(
+                    &buf[..FragmentHeader::BYTES_LEN],
+                    &buf[FragmentHeader::BYTES_LEN..(FragmentHeader::BYTES_LEN + HmacSha3256::MAC_LEN)],
+                    &mut mac[..],
+                    &buf[(r - Aes128Gcm::TAG_LEN)..r]
+                ) {
+                    // ERROR!: must be send by or finish stream
+                    Ok(v)  => if !v { return Err(TsppError::new(TsppErrorCode::AeadDecryptionFailed)); },
+                    Err(_) => return Err(TsppError::new(TsppErrorCode::AeadDecryptionFailed))
+                };
+
+                let mut k: [u8; HmacSha3256::MAC_LEN] = [0; HmacSha3256::MAC_LEN];
+                HmacSha3256::compute_oneshot(
+                    &self.secret_buf[..HmacSha3256::MAC_LEN],
+                    "TSPPv1 hello phase vrf mac key".as_bytes(),
+                    &mut k[..]
+                )?;
+
+                let mut d: [u8; Sha3256::MESSAGE_DIGEST_LEN] = [0; Sha3256::MESSAGE_DIGEST_LEN];
+                self.context_hash.digest(&mut d[..])?;
+
+                let mut mac_v: [u8; HmacSha3256::MAC_LEN] = [0; HmacSha3256::MAC_LEN];
+                HmacSha3256::compute_oneshot(
+                    &k[..],
+                    &d[..],
+                    &mut mac_v[..]
+                )?;
+
+                if !constant_time_eq(&mac[..], &mac_v[..]) {
+                    // ERROR!: must be send by or finish stream
+                    return Err(TsppError::new(TsppErrorCode::HelloPhaseVerificationFailed));
+                }
+
+                self.context_hash.update(&buf[..FragmentHeader::BYTES_LEN])?.update(&mac[..])?;
+
+                r
+
+            },
+            _ => return Err(TsppError::new(TsppErrorCode::IllegalCipherSuite))
+        };
+
+        self.state = match self.role {
+            TsppRole::ActiveOpener  => TsppState::HelloDoneRecvd,
+            TsppRole::PassiveOpener => TsppState::BidiUserStream
+        };
+        return Ok((r, self.state));
 
     }
 
@@ -536,61 +717,44 @@ impl TsppSocket {
                 k[30] = 0x00; // pad
                 k[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
 
-                self.context_hash
-                    .digest(&mut k[32..])
-                    .map_err(TsppError::from_crypto_error)?;
+                self.context_hash.digest(&mut k[32..])?;
 
-                HmacSha3256::new(&k[..])
-                    .map_err(TsppError::from_crypto_error)?
-                    .update(&self.secret_buf[..HmacSha3256::MAC_LEN])
-                    .map_err(TsppError::from_crypto_error)?
-                    .compute(&mut self.secret_buf[..HmacSha3256::MAC_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                HmacSha3256::new(&k[..])?
+                    .update(&self.secret_buf[..HmacSha3256::MAC_LEN])?
+                    .compute(&mut self.secret_buf[..HmacSha3256::MAC_LEN])?;
 
                 let mut t: [u8; HmacSha3256::MAC_LEN] = [0; HmacSha3256::MAC_LEN];
-                let (k1, n1, k2, n2): (&str, &str, &str, &str) = match self.role {
-                    TsppRole::ActiveOpener => (
+                let (s1, s2, r1, r2): (&str, &str, &str, &str) = match self.role {
+                    TsppRole::ActiveOpener  => (
                         "active opener write key",
                         "active opener write iv",
                         "passive opener write key",
-                        "passive opener write iv",
+                        "passive opener write iv"
                     ),
                     TsppRole::PassiveOpener => (
                         "passive opener write key",
                         "passive opener write iv",
                         "active opener write key",
-                        "active opener write iv",
-                    ),
+                        "active opener write iv"
+                    )
                 };
 
-                HmacSha3256::compute_oneshot(&self.secret_buf[..HmacSha3256::MAC_LEN],
-                    k1.as_bytes(), &mut t[..])
-                    .map_err(TsppError::from_crypto_error)?;
-                self.send_aead.rekey(&t[..Aes128Gcm::KEY_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                let secret: &[u8] = &self.secret_buf[..HmacSha3256::MAC_LEN];
 
-                HmacSha3256::compute_oneshot(&self.secret_buf[..HmacSha3256::MAC_LEN],
-                    n1.as_bytes(), &mut t[..])
-                    .map_err(TsppError::from_crypto_error)?;
-                self.send_aead_iv
-                    .copy_from_slice(&t[..Aes128Gcm::KEY_LEN]);
+                HmacSha3256::compute_oneshot(secret, s1.as_bytes(), &mut t[..])?;
+                self.send_aead.rekey(&t[..Aes128Gcm::KEY_LEN])?;
 
-                HmacSha3256::compute_oneshot(&self.secret_buf[..HmacSha3256::MAC_LEN],
-                    k2.as_bytes(), &mut t[..])
-                    .map_err(TsppError::from_crypto_error)?;
-                self.recv_aead.rekey(&t[..Aes128Gcm::KEY_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                HmacSha3256::compute_oneshot(secret, s2.as_bytes(), &mut t[..])?;
+                self.send_aead_iv.copy_from_slice(&t[..Aes128Gcm::MAX_NONCE_LEN]);
 
-                HmacSha3256::compute_oneshot(&self.secret_buf[..HmacSha3256::MAC_LEN],
-                    n2.as_bytes(), &mut t[..])
-                    .map_err(TsppError::from_crypto_error)?;
-                self.recv_aead_iv
-                    .copy_from_slice(&t[..Aes128Gcm::KEY_LEN]);
+                HmacSha3256::compute_oneshot(secret, r1.as_bytes(), &mut t[..])?;
+                self.recv_aead.rekey(&t[..Aes128Gcm::KEY_LEN])?;
 
-                for i in &self.secret_buf[..HmacSha3256::MAC_LEN] {
-                    print!("{:02x}", i);
-                }
-                println!();
+                HmacSha3256::compute_oneshot(secret, r2.as_bytes(), &mut t[..])?;
+                self.recv_aead_iv.copy_from_slice(&t[..Aes128Gcm::MAX_NONCE_LEN]);
+
+                self.send_frag_ctr = 0;
+                self.recv_frag_ctr = 0;
 
                 Ok(())
 
@@ -613,16 +777,44 @@ impl TsppSocket {
                 k[30] = 0x00; // pad
                 k[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
 
-                self.context_hash
-                    .digest(&mut k[32..])
-                    .map_err(TsppError::from_crypto_error)?;
+                self.context_hash.digest(&mut k[32..])?;
 
-                HmacSha3256::new(&k[..])
-                    .map_err(TsppError::from_crypto_error)?
-                    .update(&self.secret_buf[..HmacSha3256::MAC_LEN])
-                    .map_err(TsppError::from_crypto_error)?
-                    .compute(&mut self.secret_buf[..HmacSha3256::MAC_LEN])
-                    .map_err(TsppError::from_crypto_error)?;
+                HmacSha3256::new(&k[..])?
+                    .update(&self.secret_buf[..HmacSha3256::MAC_LEN])?
+                    .compute(&mut self.secret_buf[..HmacSha3256::MAC_LEN])?;
+
+                let mut t: [u8; HmacSha3256::MAC_LEN] = [0; HmacSha3256::MAC_LEN];
+                let (s1, s2, r1, r2): (&str, &str, &str, &str) = match self.role {
+                    TsppRole::ActiveOpener  => (
+                        "active opener write key",
+                        "active opener write iv",
+                        "passive opener write key",
+                        "passive opener write iv"
+                    ),
+                    TsppRole::PassiveOpener => (
+                        "passive opener write key",
+                        "passive opener write iv",
+                        "active opener write key",
+                        "active opener write iv"
+                    )
+                };
+
+                let secret: &[u8] = &self.secret_buf[..HmacSha3256::MAC_LEN];
+
+                HmacSha3256::compute_oneshot(secret, s1.as_bytes(), &mut t[..])?;
+                self.send_aead.rekey(&t[..Aes128Gcm::KEY_LEN])?;
+
+                HmacSha3256::compute_oneshot(secret, s2.as_bytes(), &mut t[..])?;
+                self.send_aead_iv.copy_from_slice(&t[..Aes128Gcm::MAX_NONCE_LEN]);
+
+                HmacSha3256::compute_oneshot(secret, r1.as_bytes(), &mut t[..])?;
+                self.recv_aead.rekey(&t[..Aes128Gcm::KEY_LEN])?;
+
+                HmacSha3256::compute_oneshot(secret, r2.as_bytes(), &mut t[..])?;
+                self.recv_aead_iv.copy_from_slice(&t[..Aes128Gcm::MAX_NONCE_LEN]);
+
+                self.send_frag_ctr = 0;
+                self.recv_frag_ctr = 0;
 
                 Ok(())
 
@@ -631,30 +823,88 @@ impl TsppSocket {
         };
     }
 
+    fn aead_seal(&mut self, aad: &[u8], plaintext: &[u8], ciphertext: &mut [u8],
+        tag: &mut [u8]) -> Result<(), TsppError> {
+
+        let mut nonce: [u8; MAX_AEAD_NONCE_LEN] = [0; MAX_AEAD_NONCE_LEN];
+        let ctr: [u8; 8] = self.send_frag_ctr.to_be_bytes();
+
+        let nonce_len: usize = match self.cipher_suite {
+            TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
+                nonce[0]  = self.send_aead_iv[0];
+                nonce[1]  = self.send_aead_iv[1];
+                nonce[2]  = self.send_aead_iv[2];
+                nonce[3]  = self.send_aead_iv[3];
+                nonce[4]  = self.send_aead_iv[4]  ^ ctr[0];
+                nonce[5]  = self.send_aead_iv[5]  ^ ctr[1];
+                nonce[6]  = self.send_aead_iv[6]  ^ ctr[2];
+                nonce[7]  = self.send_aead_iv[7]  ^ ctr[3];
+                nonce[8]  = self.send_aead_iv[8]  ^ ctr[4];
+                nonce[9]  = self.send_aead_iv[9]  ^ ctr[5];
+                nonce[10] = self.send_aead_iv[10] ^ ctr[6];
+                nonce[11] = self.send_aead_iv[11] ^ ctr[7];
+                12
+            },
+            _ => return Err(TsppError::new(TsppErrorCode::IllegalCipherSuite))
+        };
+
+        self.send_aead.encrypt_and_generate(
+            &nonce[..nonce_len],
+            aad,
+            plaintext,
+            ciphertext,
+            tag
+        )?;
+
+        self.send_frag_ctr = self.send_frag_ctr + 1;
+        return Ok(());
+
+    }
+
+    fn aead_open(&mut self, aad: &[u8], ciphertext: &[u8], plaintext: &mut [u8],
+        tag: &[u8]) -> Result<bool, TsppError> {
+
+        let mut nonce: [u8; MAX_AEAD_NONCE_LEN] = [0; MAX_AEAD_NONCE_LEN];
+        let ctr: [u8; 8] = self.recv_frag_ctr.to_be_bytes();
+
+        let nonce_len: usize = match self.cipher_suite {
+            TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
+                nonce[0]  = self.recv_aead_iv[0];
+                nonce[1]  = self.recv_aead_iv[1];
+                nonce[2]  = self.recv_aead_iv[2];
+                nonce[3]  = self.recv_aead_iv[3];
+                nonce[4]  = self.recv_aead_iv[4]  ^ ctr[0];
+                nonce[5]  = self.recv_aead_iv[5]  ^ ctr[1];
+                nonce[6]  = self.recv_aead_iv[6]  ^ ctr[2];
+                nonce[7]  = self.recv_aead_iv[7]  ^ ctr[3];
+                nonce[8]  = self.recv_aead_iv[8]  ^ ctr[4];
+                nonce[9]  = self.recv_aead_iv[9]  ^ ctr[5];
+                nonce[10] = self.recv_aead_iv[10] ^ ctr[6];
+                nonce[11] = self.recv_aead_iv[11] ^ ctr[7];
+                12
+            },
+            _ => return Err(TsppError::new(TsppErrorCode::IllegalCipherSuite))
+        };
+
+        let v: bool = self.recv_aead.decrypt_and_verify(
+            &nonce[..nonce_len],
+            aad,
+            ciphertext,
+            plaintext,
+            tag
+        )?;
+
+        self.recv_frag_ctr = self.recv_frag_ctr + 1;
+        return Ok(v);
+
+    }
+
 }
 
 
 
 
 
-
-struct HelloDoneFragment {
-    base: FragmentBaseFields,
-    hello_phase_vrf_mac: [u8; MAX_MESSAGE_DIGEST_LEN] // # length can be derived from known.cipher_suite
-}
-
-struct UserStreamFragment {
-    base: FragmentBaseFields,
-    payload: Vec<u8>
-}
-
-struct Finish {
-    base: FragmentBaseFields
-}
-
-struct KeyUpdate {
-    base: FragmentBaseFields
-}
 
 // struct Secrets {
 //
@@ -683,7 +933,7 @@ enum FragmentType {
 
 impl FragmentType {
 
-    const BYTES_NUM: usize = 4;
+    const BYTES_LEN: usize = 4;
 
     fn from_u8(u: u8) -> Result<Self, TsppError> {
         return match u {
@@ -723,7 +973,7 @@ pub enum TsppVersion {
 
 impl TsppVersion {
 
-    const BYTES_NUM: usize = 4;
+    const BYTES_LEN: usize = 4;
 
     fn from_u32(u: u32) -> Result<Self, TsppError> {
         return match u {
@@ -765,7 +1015,7 @@ impl Serializable for TsppVersion {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
-        if buf.len() < Self::BYTES_NUM {
+        if buf.len() < Self::BYTES_LEN {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
@@ -780,7 +1030,7 @@ impl Serializable for TsppVersion {
 
     fn to_bytes(&self, buf: &mut [u8]) -> Result<(), TsppError> {
 
-        if buf.len() < Self::BYTES_NUM {
+        if buf.len() < Self::BYTES_LEN {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
@@ -804,7 +1054,7 @@ pub enum TsppCipherSuite {
 
 impl TsppCipherSuite {
 
-    const BYTES_NUM: usize = 8;
+    const BYTES_LEN: usize = 8;
 
     fn from_u64(u: u64) -> Result<Self, TsppError> {
         return match u {
@@ -839,7 +1089,7 @@ impl Serializable for TsppCipherSuite {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
-        if buf.len() < Self::BYTES_NUM {
+        if buf.len() < Self::BYTES_LEN {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
@@ -858,7 +1108,7 @@ impl Serializable for TsppCipherSuite {
 
     fn to_bytes(&self, buf: &mut [u8]) -> Result<(), TsppError> {
 
-        if buf.len() < Self::BYTES_NUM {
+        if buf.len() < Self::BYTES_LEN {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
@@ -878,21 +1128,74 @@ impl Serializable for TsppCipherSuite {
 
 }
 
-struct FragmentBaseFields {
+struct FragmentHeader {
     frag_type: FragmentType,
     reserved: u8,
-    length: u16, // # length of subsequent part
+    length: u16, // # length of payload (i.e. overall length - (header length + tag length))
 }
 
-impl FragmentBaseFields {
-    const BYTES_NUM: usize = 4;
+impl FragmentHeader {
+
+    const BYTES_LEN: usize = 4;
+
+    fn make(buf: &[u8]) -> Result<Self, TsppError> {
+
+        if buf.len() < Self::BYTES_LEN {
+            return Err(TsppError::new(TsppErrorCode::BufferTooShort));
+        }
+
+        return Ok(Self{
+            frag_type: FragmentType::from_u8(buf[0])?,
+            reserved: buf[1],
+            length: ((buf[2] as u16) << 8) | (buf[3] as u16)
+        });
+
+    }
+
+    fn make_bytes(frag_type: FragmentType, reserved: u8,
+        payload_len: usize) -> Result<[u8; Self::BYTES_LEN], TsppError> {
+
+        // # integer overflow validation code
+        // if payload_len > usize::MAX - tag_len {}
+
+        if payload_len > 0xffff {
+            return Err(TsppError::new(TsppErrorCode::IllegalArgument));
+        }
+
+        return Ok([frag_type as u8, reserved, (payload_len >> 8) as u8, payload_len as u8]);
+
+    }
+
+    fn make_bytes_into(frag_type: FragmentType, reserved: u8, payload_len: usize,
+        buf: &mut [u8]) -> Result<(), TsppError> {
+
+        if buf.len() < Self::BYTES_LEN {
+            return Err(TsppError::new(TsppErrorCode::BufferTooShort));
+        }
+
+        // # integer overflow validation code
+        // if payload_len > usize::MAX - tag_len {}
+
+        if payload_len > 0xffff {
+            return Err(TsppError::new(TsppErrorCode::IllegalArgument));
+        }
+
+        buf[0] = frag_type as u8;
+        buf[1] = reserved;
+        buf[2] = (payload_len >> 8) as u8;
+        buf[3] = payload_len as u8;
+
+        return Ok(());
+
+    }
+
 }
 
-impl Serializable for FragmentBaseFields {
+impl Serializable for FragmentHeader {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
-        if buf.len() < Self::BYTES_NUM {
+        if buf.len() < Self::BYTES_LEN {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
@@ -906,7 +1209,7 @@ impl Serializable for FragmentBaseFields {
 
     fn to_bytes(&self, buf: &mut [u8]) -> Result<(), TsppError> {
 
-        if buf.len() < Self::BYTES_NUM {
+        if buf.len() < Self::BYTES_LEN {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
@@ -922,7 +1225,7 @@ impl Serializable for FragmentBaseFields {
 }
 
 struct HelloFragment {
-    base: FragmentBaseFields,
+    base: FragmentHeader,
     version: TsppVersion,
     cipher_suite: TsppCipherSuite,
     random: [u8; 64],
@@ -934,7 +1237,7 @@ struct HelloFragment {
 impl HelloFragment {
 
     pub fn len(&self) -> usize {
-        return FragmentBaseFields::BYTES_NUM + (self.base.length as usize);
+        return FragmentHeader::BYTES_LEN + (self.base.length as usize);
     }
 
 }
@@ -944,9 +1247,9 @@ impl Serializable for HelloFragment {
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
         let len: usize =
-            FragmentBaseFields::BYTES_NUM +
-            TsppVersion::BYTES_NUM +
-            TsppCipherSuite::BYTES_NUM +
+            FragmentHeader::BYTES_LEN +
+            TsppVersion::BYTES_LEN +
+            TsppCipherSuite::BYTES_LEN +
             64;
         if buf.len() < len {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
@@ -961,7 +1264,7 @@ impl Serializable for HelloFragment {
         }
 
         let mut v: Self = Self{
-            base: FragmentBaseFields::from_bytes(&buf[..])?,
+            base: FragmentHeader::from_bytes(&buf[..])?,
             version: TsppVersion::from_bytes(&buf[4..])?,
             cipher_suite: cipher_suite,
             random: [0; 64],
@@ -985,9 +1288,9 @@ impl Serializable for HelloFragment {
 
         let c: CipherSuiteConstants = self.cipher_suite.constants();
         let len: usize =
-            FragmentBaseFields::BYTES_NUM +
-            TsppVersion::BYTES_NUM +
-            TsppCipherSuite::BYTES_NUM +
+            FragmentHeader::BYTES_LEN +
+            TsppVersion::BYTES_LEN +
+            TsppCipherSuite::BYTES_LEN +
             64 +
             c.ke_pubkey_len +
             c.au_pubkey_len +
@@ -1013,25 +1316,30 @@ impl Serializable for HelloFragment {
 
 }
 
+struct HelloDoneFragment {
+    base: FragmentHeader,
+    hello_phase_vrf_mac: [u8; MAX_HASH_MESSAGE_DIGEST_LEN] // # length can be derived from known.cipher_suite
+}
 
+impl HelloDoneFragment {
 
+    pub fn len(&self) -> usize {
+        return FragmentHeader::BYTES_LEN + (self.base.length as usize);
+    }
 
-
-
-
-
+}
 
 impl Serializable for HelloDoneFragment {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
-        if buf.len() < FragmentBaseFields::BYTES_NUM {
+        if buf.len() < FragmentHeader::BYTES_LEN {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
-        let base: FragmentBaseFields = FragmentBaseFields::from_bytes(&buf[..])?;
+        let base: FragmentHeader = FragmentHeader::from_bytes(&buf[..])?;
         let mac_len: usize = base.length as usize;
-        let overall_len: usize = FragmentBaseFields::BYTES_NUM + mac_len;
+        let overall_len: usize = FragmentHeader::BYTES_LEN + mac_len;
 
         if buf.len() < overall_len {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
@@ -1039,11 +1347,11 @@ impl Serializable for HelloDoneFragment {
 
         let mut v: Self = Self{
             base: base,
-            hello_phase_vrf_mac: [0; MAX_MESSAGE_DIGEST_LEN]
+            hello_phase_vrf_mac: [0; MAX_HASH_MESSAGE_DIGEST_LEN]
         };
 
         v.hello_phase_vrf_mac[..mac_len]
-            .copy_from_slice(&buf[FragmentBaseFields::BYTES_NUM..overall_len]);
+            .copy_from_slice(&buf[FragmentHeader::BYTES_LEN..overall_len]);
 
         return Ok(v);
 
@@ -1052,20 +1360,30 @@ impl Serializable for HelloDoneFragment {
     fn to_bytes(&self, buf: &mut [u8]) -> Result<(), TsppError> {
 
         let mac_len: usize = self.base.length as usize;
-        let overall_len: usize = FragmentBaseFields::BYTES_NUM + mac_len;
+        let overall_len: usize = FragmentHeader::BYTES_LEN + mac_len;
 
         if buf.len() < overall_len {
             return Err(TsppError::new(TsppErrorCode::BufferTooShort));
         }
 
         self.base.to_bytes(&mut buf[..]).unwrap();
-        buf[FragmentBaseFields::BYTES_NUM..overall_len]
+        buf[FragmentHeader::BYTES_LEN..overall_len]
             .copy_from_slice(&self.hello_phase_vrf_mac[..mac_len]);
 
         return Ok(());
 
     }
 
+}
+
+struct UserStreamFragment {
+    base: FragmentHeader,
+    payload: Vec<u8>,
+    tag: [u8; MAX_AEAD_TAG_LEN]
+}
+
+struct KeyUpdate {
+    base: FragmentHeader
 }
 
 struct CipherSuiteConstants {
@@ -1112,18 +1430,66 @@ impl TsppCipherSuite {
         };
     }
 
-    fn hash(&self) -> Result<Hash, TsppError> {
+    /*
+
+    やっぱこれ、utilのAeadとかを使うんじゃなくて、tspp::crypto::TsppAeadとかを作って
+    それをCipherSuiteからアクセスできるようにmanagedにしたほうがいい（たとえば、Aes192Gcmとかってあんま使わんやろうから）。
+
+    んで、let algo = TsppAeadAlgorhitm::Aes128Gcm;
+    let aead = algo.new_instance()とかにしたり、
+
+    let cs = CipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256;
+    cs.new_aead() {
+        algo.new_instance()
+    }
+
+    とかしたほうがいい
+
+    */
+
+    fn algorithms(&self) ->
+        Result<(DiffieHellmanAlgorithm, DigitalSignatureAlgorithm, AeadAlgorithm, HashAlgorithm), TsppError> {
         return match self {
             Self::NULL_NULL_NULL_NULL                 => Err(TsppError::new(TsppErrorCode::IllegalCipherSuite)),
-            Self::X25519_Ed25519_AES_128_GCM_SHA3_256 => Ok(Hash::new(HashAlgorithm::Sha3256)),
+            Self::X25519_Ed25519_AES_128_GCM_SHA3_256 => Ok((
+                DiffieHellmanAlgorithm::X25519,
+                DigitalSignatureAlgorithm::Ed25519,
+                AeadAlgorithm::Aes128Gcm,
+                HashAlgorithm::Sha3256
+            )),
         };
     }
 
+    fn ke_algorithm(&self) -> Result<DiffieHellmanAlgorithm, TsppError> {
+        return Ok(self.algorithms()?.0);
+    }
+
+    fn sign_algorithm(&self) -> Result<DigitalSignatureAlgorithm, TsppError> {
+        return Ok(self.algorithms()?.1);
+    }
+
+    fn signer(&self, privkey: &[u8]) -> Result<DigitalSignatureSigner, TsppError> {
+        return Ok(self.sign_algorithm()?.signer_instance(privkey)?);
+    }
+
+    fn verifier(&self, pubkey: &[u8]) -> Result<DigitalSignatureVerifier, TsppError> {
+        return Ok(self.sign_algorithm()?.verifier_instance(pubkey)?);
+    }
+
+    fn aead_algorithm(&self) -> Result<AeadAlgorithm, TsppError> {
+        return Ok(self.algorithms()?.2);
+    }
+
     fn aead(&self, key: &[u8]) -> Result<Aead, TsppError> {
-        return match self {
-            Self::NULL_NULL_NULL_NULL                 => Err(TsppError::new(TsppErrorCode::IllegalCipherSuite)),
-            Self::X25519_Ed25519_AES_128_GCM_SHA3_256 => Ok(Aead::new(AeadAlgorithm::Aes128Gcm, key).map_err(TsppError::from_crypto_error)?),
-        };
+        return Ok(self.aead_algorithm()?.instance(key)?);
+    }
+
+    fn hash_algorithm(&self) -> Result<HashAlgorithm, TsppError> {
+        return Ok(self.algorithms()?.3);
+    }
+
+    fn hash(&self) -> Result<Hash, TsppError> {
+        return Ok(self.hash_algorithm()?.instance());
     }
 
 }

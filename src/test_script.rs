@@ -4,7 +4,7 @@ use crate::net::tspp::TsppSocket;
 use crate::net::tspp::TsppState;
 use crate::net::tspp::TsppRole;
 use crate::net::tspp::TsppVersion;
-use cryptopkg::crypto::util::DigitalSignatureAlgorithm;
+use crate::net::crypto::DigitalSignatureAlgorithm;
 
 pub fn main() {
 
@@ -41,24 +41,54 @@ pub fn main() {
     printbytesln(&buf[..s]);
     println!("{}", s);
 
-    let (_r, _): (usize, TsppState) = bob.hello_phase_recv(&buf[..]).unwrap();
+    let (_r, _): (usize, TsppState) = bob.hello_phase_recv(&mut buf[..]).unwrap();
     let (_s, _): (usize, TsppState) = bob.hello_phase_send(&mut buf[..]).unwrap();
 
-    let (_r, _): (usize, TsppState) = alice.hello_phase_recv(&buf[..]).unwrap();
+    let (_r, _): (usize, TsppState) = alice.hello_phase_recv(&mut buf[..]).unwrap();
 
     let (s, _): (usize, TsppState) = bob.hello_phase_send(&mut buf[..]).unwrap();
 
     printbytesln(&buf[..s]);
     println!("{}", s);
 
-    let (_r, _): (usize, TsppState) = alice.hello_phase_recv(&buf[..]).unwrap();
+    let (_r, _): (usize, TsppState) = alice.hello_phase_recv(&mut buf[..]).unwrap();
 
-    let (s, _): (usize, TsppState) = alice.hello_phase_send(&mut buf[..]).unwrap();
+    let (s, state): (usize, TsppState) = alice.hello_phase_send(&mut buf[..]).unwrap();
 
     printbytesln(&buf[..s]);
     println!("{}", s);
 
-    let (_r, _): (usize, TsppState) = bob.hello_phase_recv(&buf[..]).unwrap();
+    println!("{}", state == TsppState::BidiUserStream);
+
+    let (_r, state): (usize, TsppState) = bob.hello_phase_recv(&mut buf[..]).unwrap();
+    println!("{}", state == TsppState::BidiUserStream);
+
+    let mut buf: [u8; 256] = [0; 256];
+    let (_, w) = alice.send("Hello, this is Alice.".as_bytes(), &mut buf[..]).unwrap();
+
+    printbytesln(&buf[..w]);
+    println!("{}", w);
+
+    let mut buf2: [u8; 256] = [0; 256];
+    let (_, w) = bob.recv(&buf[..w], &mut buf2[..]).unwrap();
+
+    printbytesln(&buf2[..w]);
+    println!("{}", std::str::from_utf8(&buf2[..w]).unwrap());
+    println!("{}", w);
+
+    let mut buf: [u8; 256] = [0; 256];
+    let (_, w) = bob.send("Hello, this is Bob.".as_bytes(), &mut buf[..]).unwrap();
+
+    printbytesln(&buf[..w]);
+    println!("{}", w);
+
+    let mut buf2: [u8; 256] = [0; 256];
+    let (_, w) = alice.recv(&buf[..w], &mut buf2[..]).unwrap();
+
+    printbytesln(&buf2[..w]);
+    println!("{}", std::str::from_utf8(&buf2[..w]).unwrap());
+    println!("{}", w);
+
 
 }
 
