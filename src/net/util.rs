@@ -8,21 +8,24 @@
 // use std::net::TcpStream;
 //
 // pub struct TsppProtectedTcpStream {
+//     tspp: TsppSocket,
 //     tcp: TcpStream
 // }
 //
 // pub struct TsppProtectedTcpListener {
+//     tspp: TsppSocket,
 //     tcp: TcpListener
 // }
 //
 // impl TsppProtectedTcpStream {
 //
-//     pub fn connect() -> {
+//     pub fn connect(tspp_version: TsppVersion, tspp_cipher_suite: TsppCipherSuite
+//         ) -> Result<> {
 //
 //     }
 //
-//     pub fn listen() -> {
+// }
 //
-//     }
+// impl TsppProtectedTcpListener {
 //
 // }

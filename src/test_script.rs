@@ -1,7 +1,7 @@
 use crate::net::tspp::TsppCipherSuite;
 use crate::net::tspp::TsppEngine;
 use crate::net::tspp::TsppSocket;
-use crate::net::tspp::TsppState;
+use crate::net::tspp::TsppHelloPhaseState;
 use crate::net::tspp::TsppRole;
 use crate::net::tspp::TsppVersion;
 use crate::net::crypto::DigitalSignatureAlgorithm;
@@ -36,32 +36,32 @@ pub fn main() {
 
     let mut buf: [u8; 1024] = [0; 1024];
 
-    let (s, _): (usize, TsppState) = alice.hello_phase_send(&mut buf[..]).unwrap();
+    let (s, _) = alice.hello_phase_send(&mut buf[..]).unwrap();
 
     printbytesln(&buf[..s]);
     println!("{}", s);
 
-    let (_r, _): (usize, TsppState) = bob.hello_phase_recv(&mut buf[..]).unwrap();
-    let (_s, _): (usize, TsppState) = bob.hello_phase_send(&mut buf[..]).unwrap();
+    let (_r, _) = bob.hello_phase_recv(&mut buf[..]).unwrap();
+    let (_s, _) = bob.hello_phase_send(&mut buf[..]).unwrap();
 
-    let (_r, _): (usize, TsppState) = alice.hello_phase_recv(&mut buf[..]).unwrap();
+    let (_r, _) = alice.hello_phase_recv(&mut buf[..]).unwrap();
 
-    let (s, _): (usize, TsppState) = bob.hello_phase_send(&mut buf[..]).unwrap();
-
-    printbytesln(&buf[..s]);
-    println!("{}", s);
-
-    let (_r, _): (usize, TsppState) = alice.hello_phase_recv(&mut buf[..]).unwrap();
-
-    let (s, state): (usize, TsppState) = alice.hello_phase_send(&mut buf[..]).unwrap();
+    let (s, _) = bob.hello_phase_send(&mut buf[..]).unwrap();
 
     printbytesln(&buf[..s]);
     println!("{}", s);
 
-    println!("{}", state == TsppState::BidiUserStream);
+    let (_r, _) = alice.hello_phase_recv(&mut buf[..]).unwrap();
 
-    let (_r, state): (usize, TsppState) = bob.hello_phase_recv(&mut buf[..]).unwrap();
-    println!("{}", state == TsppState::BidiUserStream);
+    let (s, state) = alice.hello_phase_send(&mut buf[..]).unwrap();
+
+    printbytesln(&buf[..s]);
+    println!("{}", s);
+
+    println!("{}", state == TsppHelloPhaseState::Done);
+
+    let (_r, state) = bob.hello_phase_recv(&mut buf[..]).unwrap();
+    println!("{}", state == TsppHelloPhaseState::Done);
 
     let mut buf: [u8; 256] = [0; 256];
     let (_, w) = alice.send("Hello, this is Alice.".as_bytes(), &mut buf[..]).unwrap();
@@ -89,6 +89,31 @@ pub fn main() {
     println!("{}", std::str::from_utf8(&buf2[..w]).unwrap());
     println!("{}", w);
 
+
+
+
+    let mut buf: [u8; 256] = [0; 256];
+    let w = alice.send_bye(&mut buf[..]).unwrap();
+
+    printbytesln(&buf[..w]);
+    println!("{}", w);
+
+    let mut buf2: [u8; 256] = [0; 256];
+    let (r, w) = bob.recv(&buf[..w], &mut buf2[..]).unwrap();
+
+    println!("{}, {}", r, w);
+
+
+    let mut buf: [u8; 256] = [0; 256];
+    let w = bob.send_bye(&mut buf[..]).unwrap();
+
+    printbytesln(&buf[..w]);
+    println!("{}", w);
+
+    let mut buf2: [u8; 256] = [0; 256];
+    let (r, w) = alice.recv(&buf[..w], &mut buf2[..]).unwrap();
+
+    println!("{}, {}", r, w);
 
 }
 

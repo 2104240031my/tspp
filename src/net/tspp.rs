@@ -29,8 +29,6 @@ use crate::net::crypto::constant_time_eq;
 use crate::net::error::TsppError;
 use crate::net::error::TsppErrorCode;
 
-const BUF_LEN: usize = 0;
-
 const MAX_KE_PRIVATE_KEY_LEN: usize      = X25519::PRIVATE_KEY_LEN;
 const MAX_KE_PUBLIC_KEY_LEN: usize       = X25519::PUBLIC_KEY_LEN;
 const MAX_CURRENT_SECRET_LEN: usize      = HmacSha3256::MAC_LEN;
@@ -42,12 +40,10 @@ const MAX_AEAD_TAG_LEN: usize            = Aes128Gcm::TAG_LEN;
 const MAX_HASH_MESSAGE_DIGEST_LEN: usize = Sha3256::MESSAGE_DIGEST_LEN;
 
 pub struct TsppSocket {
-    state: TsppState,
+    state: State,
     version: TsppVersion,
     cipher_suite: TsppCipherSuite,
     role: TsppRole,
-    send_buf: [u8; BUF_LEN],
-    recv_buf: [u8; BUF_LEN],
     send_aead_iv: [u8; 12],
     recv_aead_iv: [u8; 12],
     send_frag_ctr: u64,
@@ -60,7 +56,7 @@ pub struct TsppSocket {
     context_hash: Hash,
 }
 
-pub enum TsppState {
+enum State {
     Initial,
     HelloSent,
     HelloRecvd,
@@ -89,7 +85,25 @@ impl PartialEq for TsppRole {
 
 impl Eq for TsppRole {}
 
-impl TsppState {
+pub enum TsppHelloPhaseState {
+    InProgress,
+    Done,
+}
+
+
+impl Clone for TsppHelloPhaseState {
+    fn clone(&self) -> Self { return *self; }
+}
+
+impl Copy for TsppHelloPhaseState {}
+
+impl PartialEq for TsppHelloPhaseState {
+    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
+}
+
+impl Eq for TsppHelloPhaseState {}
+
+impl State {
 
     fn can_send_hello(&self, role: TsppRole) -> bool {
         return
@@ -123,27 +137,27 @@ impl TsppState {
         return *self == Self::BidiUserStream || *self == Self::ByeSent;
     }
 
-    // fn can_send_hello_bye(&self) -> bool {
-//
-    // }
-//
-    // fn can_recv_hello_bye(&self) -> bool {
-//
-    // }
+    fn can_send_bye(&self) -> bool {
+        return self.can_send_user_stream();
+    }
+
+    fn can_recv_bye(&self) -> bool {
+        return self.can_recv_user_stream();
+    }
 
 }
 
-impl Clone for TsppState {
+impl Clone for State {
     fn clone(&self) -> Self { return *self; }
 }
 
-impl Copy for TsppState {}
+impl Copy for State {}
 
-impl PartialEq for TsppState {
+impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
 }
 
-impl Eq for TsppState {}
+impl Eq for State {}
 
 static ENGINE: LazyLock<Mutex<TsppEngine>> = LazyLock::new(|| Mutex::new(TsppEngine::new()));
 
@@ -186,12 +200,10 @@ impl TsppSocket {
         }
 
         let mut v: Self = Self{
-            state: TsppState::Initial,
+            state: State::Initial,
             version: version,
             cipher_suite: cipher_suite,
             role: role,
-            send_buf: [0; BUF_LEN],
-            recv_buf: [0; BUF_LEN],
             send_aead_iv: [0; 12],
             recv_aead_iv: [0; 12],
             send_frag_ctr: 0,
@@ -212,44 +224,52 @@ impl TsppSocket {
 
     }
 
-    pub fn hello_phase_send(&mut self, buf: &mut [u8]) -> Result<(usize, TsppState), TsppError> {
+    pub fn hello_phase_send(&mut self, buf: &mut [u8]) -> Result<(usize, TsppHelloPhaseState), TsppError> {
         return match self.role {
             TsppRole::ActiveOpener => match self.state {
-                TsppState::Initial        => self.send_hello(buf),
-                TsppState::HelloDoneRecvd => self.send_hello_done(buf),
-                TsppState::BidiUserStream => Ok((0, TsppState::BidiUserStream)),
-                _                         => Err(TsppError::new(TsppErrorCode::UnsuitableState))
+                State::Initial        => Ok((self.send_hello(buf)?, TsppHelloPhaseState::InProgress)),
+                State::HelloDoneRecvd => {
+                    let s: usize = self.send_hello_done(buf)?;
+                    self.set_initial_user_stream_secret()?;
+                    Ok((s, TsppHelloPhaseState::Done))
+                },
+                State::BidiUserStream => Ok((0, TsppHelloPhaseState::Done)),
+                _                     => Err(TsppError::new(TsppErrorCode::UnsuitableState))
             },
             TsppRole::PassiveOpener => match self.state {
-                TsppState::HelloRecvd     => {
-                    let (s, state): (usize, TsppState) = self.send_hello(buf)?;
+                State::HelloRecvd     => {
+                    let s: usize = self.send_hello(buf)?;
                     self.set_hello_phase_secret()?;
-                    Ok((s, state))
+                    Ok((s, TsppHelloPhaseState::InProgress))
                 },
-                TsppState::HelloSent      => self.send_hello_done(buf),
-                TsppState::BidiUserStream => Ok((0, TsppState::BidiUserStream)),
-                _                         => Err(TsppError::new(TsppErrorCode::UnsuitableState))
+                State::HelloSent      => Ok((self.send_hello_done(buf)?, TsppHelloPhaseState::Done)),
+                State::BidiUserStream => Ok((0, TsppHelloPhaseState::Done)),
+                _                     => Err(TsppError::new(TsppErrorCode::UnsuitableState))
             }
         };
     }
 
-    pub fn hello_phase_recv(&mut self, buf: &mut [u8]) -> Result<(usize, TsppState), TsppError> {
+    pub fn hello_phase_recv(&mut self, buf: &mut [u8]) -> Result<(usize, TsppHelloPhaseState), TsppError> {
         return match self.role {
             TsppRole::ActiveOpener => match self.state {
-                TsppState::HelloSent      => {
-                    let (r, state): (usize, TsppState) = self.recv_hello(buf)?;
+                State::HelloSent      => {
+                    let r: usize = self.recv_hello(buf)?;
                     self.set_hello_phase_secret()?;
-                    Ok((r, state))
+                    Ok((r, TsppHelloPhaseState::InProgress))
                 },
-                TsppState::HelloRecvd     => self.recv_hello_done(buf),
-                TsppState::BidiUserStream => Ok((0, TsppState::BidiUserStream)),
-                _                         => Err(TsppError::new(TsppErrorCode::UnsuitableState))
+                State::HelloRecvd     => Ok((self.recv_hello_done(buf)?, TsppHelloPhaseState::InProgress)),
+                State::BidiUserStream => Ok((0, TsppHelloPhaseState::Done)),
+                _                     => Err(TsppError::new(TsppErrorCode::UnsuitableState))
             },
             TsppRole::PassiveOpener => match self.state {
-                TsppState::Initial        => self.recv_hello(buf),
-                TsppState::HelloDoneSent  => self.recv_hello_done(buf),
-                TsppState::BidiUserStream => Ok((0, TsppState::BidiUserStream)),
-                _                         => Err(TsppError::new(TsppErrorCode::UnsuitableState))
+                State::Initial        => Ok((self.recv_hello(buf)?, TsppHelloPhaseState::InProgress)),
+                State::HelloDoneSent  => {
+                    let r: usize = self.recv_hello_done(buf)?;
+                    self.set_initial_user_stream_secret()?;
+                    Ok((r, TsppHelloPhaseState::Done))
+                },
+                State::BidiUserStream => Ok((0, TsppHelloPhaseState::Done)),
+                _                     => Err(TsppError::new(TsppErrorCode::UnsuitableState))
             }
         };
     }
@@ -356,7 +376,14 @@ impl TsppSocket {
 
             let hdr: FragmentHeader = FragmentHeader::make(&in_buf[i_off..])?;
             if hdr.frag_type != FragmentType::UserStream {
+
+                if hdr.frag_type == FragmentType::Bye {
+                    read = read + self.recv_bye(&in_buf[i_off..])?;
+                    break;
+                }
+
                 return Err(TsppError::new(TsppErrorCode::IllegalFragment));
+
             }
 
             let i1: usize = i_off + FragmentHeader::BYTES_LEN;
@@ -385,21 +412,33 @@ impl TsppSocket {
 
     }
 
-    pub fn send_bye(&mut self, buf: &[u8]) -> Result<(), TsppError> {
+    pub fn send_bye(&mut self, buf: &mut [u8]) -> Result<usize, TsppError> {
+
+        if !self.state.can_send_bye() {
+            return Err(TsppError::new(TsppErrorCode::UnsuitableState));
+        }
+
+        let tag_len: usize = self.cipher_suite.constants().aead_tag_len;
+        let s: usize = FragmentHeader::BYTES_LEN + tag_len;
+
+        let mut hdr: [u8; FragmentHeader::BYTES_LEN] = [0; FragmentHeader::BYTES_LEN];
+        FragmentHeader::make_bytes_into(FragmentType::Bye, 0x00, 0, &mut hdr[..])?;
+
+        buf[..FragmentHeader::BYTES_LEN].copy_from_slice(&hdr[..]);
+        self.aead_seal(&hdr[..], &[], &mut [], &mut buf[FragmentHeader::BYTES_LEN..s])?;
 
         self.state = match self.state {
-            TsppState::BidiUserStream => TsppState::ByeSent,
-            TsppState::ByeRecvd       => TsppState::Closed,
+            State::BidiUserStream => State::ByeSent,
+            State::ByeRecvd       => State::Closed,
             _                         => {
                 return Err(TsppError::new(TsppErrorCode::UnsuitableState));
             }
         };
-
-        return Ok(());
+        return Ok(s);
 
     }
 
-    fn send_hello(&mut self, buf: &mut [u8]) -> Result<(usize, TsppState), TsppError> {
+    fn send_hello(&mut self, buf: &mut [u8]) -> Result<usize, TsppError> {
 
         if !self.state.can_send_hello(self.role) {
             return Err(TsppError::new(TsppErrorCode::UnsuitableState));
@@ -483,12 +522,12 @@ impl TsppSocket {
 
         frag.to_bytes(&mut buf[..])?;
 
-        self.state = TsppState::HelloSent;
-        return Ok((s, self.state));
+        self.state = State::HelloSent;
+        return Ok(s);
 
     }
 
-    fn recv_hello(&mut self, buf: &[u8]) -> Result<(usize, TsppState), TsppError> {
+    fn recv_hello(&mut self, buf: &[u8]) -> Result<usize, TsppError> {
 
         if !self.state.can_recv_hello(self.role) {
             return Err(TsppError::new(TsppErrorCode::UnsuitableState));
@@ -567,12 +606,12 @@ impl TsppSocket {
 
         self.context_hash.update(&buf[(r - c.au_signature_len)..r])?;
 
-        self.state = TsppState::HelloRecvd;
-        return Ok((r, self.state));
+        self.state = State::HelloRecvd;
+        return Ok(r);
 
     }
 
-    fn send_hello_done(&mut self, buf: &mut [u8]) -> Result<(usize, TsppState), TsppError> {
+    fn send_hello_done(&mut self, buf: &mut [u8]) -> Result<usize, TsppError> {
 
         if !self.state.can_send_hello_done(self.role) {
             return Err(TsppError::new(TsppErrorCode::UnsuitableState));
@@ -622,14 +661,14 @@ impl TsppSocket {
         };
 
         self.state = match self.role {
-            TsppRole::ActiveOpener  => TsppState::BidiUserStream,
-            TsppRole::PassiveOpener => TsppState::HelloDoneSent
+            TsppRole::ActiveOpener  => State::BidiUserStream,
+            TsppRole::PassiveOpener => State::HelloDoneSent
         };
-        return Ok((s, self.state));
+        return Ok(s);
 
     }
 
-    fn recv_hello_done(&mut self, buf: &mut [u8]) -> Result<(usize, TsppState), TsppError> {
+    fn recv_hello_done(&mut self, buf: &mut [u8]) -> Result<usize, TsppError> {
 
         if !self.state.can_recv_hello_done(self.role) {
             return Err(TsppError::new(TsppErrorCode::UnsuitableState));
@@ -696,10 +735,49 @@ impl TsppSocket {
         };
 
         self.state = match self.role {
-            TsppRole::ActiveOpener  => TsppState::HelloDoneRecvd,
-            TsppRole::PassiveOpener => TsppState::BidiUserStream
+            TsppRole::ActiveOpener  => State::HelloDoneRecvd,
+            TsppRole::PassiveOpener => State::BidiUserStream
         };
-        return Ok((r, self.state));
+        return Ok(r);
+
+    }
+
+    fn recv_bye(&mut self, buf: &[u8]) -> Result<usize, TsppError> {
+
+        if !self.state.can_recv_bye() {
+            return Err(TsppError::new(TsppErrorCode::UnsuitableState));
+        }
+
+        let tag_len: usize = self.cipher_suite.constants().aead_tag_len;
+        let r: usize = FragmentHeader::BYTES_LEN + tag_len;
+        if buf.len() < r {
+            return Err(TsppError::new(TsppErrorCode::BufferTooShort));
+        }
+
+        let hdr: FragmentHeader = FragmentHeader::make(&buf[..])?;
+        if hdr.frag_type != FragmentType::Bye || hdr.length as usize != 0 {
+            return Err(TsppError::new(TsppErrorCode::IllegalFragment));
+        }
+
+        match self.aead_open(
+            &buf[..FragmentHeader::BYTES_LEN],
+            &[],
+            &mut [],
+            &buf[FragmentHeader::BYTES_LEN..r]
+        ) {
+            // ERROR!: must be send by or finish stream
+            Ok(v)  => if !v { return Err(TsppError::new(TsppErrorCode::AeadDecryptionFailed)); },
+            Err(_) => return Err(TsppError::new(TsppErrorCode::AeadDecryptionFailed))
+        };
+
+        self.state = match self.state {
+            State::BidiUserStream => State::ByeRecvd,
+            State::ByeSent        => State::Closed,
+            _                     => {
+                return Err(TsppError::new(TsppErrorCode::UnsuitableState));
+            }
+        };
+        return Ok(r);
 
     }
 
@@ -925,7 +1003,7 @@ enum FragmentType {
     Hello             = 0x00,
     HelloDone         = 0x01,
     UserStream        = 0x02,
-    Finish            = 0x03,
+    Bye               = 0x03,
     KeyUpdate         = 0x04,
     HelloRetryRequest = 0x05,
     HelloRetry        = 0x06,
@@ -940,7 +1018,7 @@ impl FragmentType {
             0x00 => Ok(Self::Hello),
             0x01 => Ok(Self::HelloDone),
             0x02 => Ok(Self::UserStream),
-            0x03 => Ok(Self::Finish),
+            0x03 => Ok(Self::Bye),
             0x04 => Ok(Self::KeyUpdate),
             0x05 => Ok(Self::HelloRetryRequest),
             0x06 => Ok(Self::HelloRetry),
@@ -1493,3 +1571,5 @@ impl TsppCipherSuite {
     }
 
 }
+
+// markers

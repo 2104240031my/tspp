@@ -30,6 +30,7 @@ pub enum TsppErrorCode {
     PeerAuthFailed,
     AeadDecryptionFailed,
     HelloPhaseVerificationFailed,
+    SocketIsAlreadyClosed,
 
 }
 
@@ -102,6 +103,7 @@ impl Display for TsppError {
             TsppErrorCode::PeerAuthFailed            => "peer authentication failed",
             TsppErrorCode::AeadDecryptionFailed => "aead decryption failed",
             TsppErrorCode::HelloPhaseVerificationFailed => "hello phase verification failed",
+            TsppErrorCode::SocketIsAlreadyClosed => "socket is already closed",
         });
     }
 

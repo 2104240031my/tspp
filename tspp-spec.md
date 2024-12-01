@@ -57,7 +57,8 @@ struct UserStreamFragment: Fragment {
 struct ByeFragment: Fragment {
     frag_type: FragmentType = FragmentType.Bye,
     reserved: u8,
-    length: u16 = 0,
+    length: u16,
+    bye_mac: [u8]
 }
 
 struct KeyUpdateFragment: Fragment {
