@@ -340,7 +340,11 @@ impl TsppSocket {
     pub fn recv(&mut self, in_buf: &[u8], out_buf: &mut [u8]) -> Result<(usize, usize), TsppError> {
 
         if !self.state.can_recv_user_stream() {
-            return Err(TsppError::new(TsppErrorCode::UserStreamIsNotReady));
+            return Err(if self.state == State::ByeRecvd {
+                TsppError::new(TsppErrorCode::ByeFragmentRecvd)
+            } else {
+                TsppError::new(TsppErrorCode::UserStreamIsNotReady)
+            });
         }
 
         let tag_len: usize = self.cipher_suite.constants().aead_tag_len;
