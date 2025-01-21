@@ -1,3 +1,4 @@
+use cryptopkg::crypto::ctime::constant_time_eq;
 use cryptopkg::crypto::feature::Aead as AeadFeature;
 use cryptopkg::crypto::feature::DiffieHellman as DiffieHellmanFeature;
 use cryptopkg::crypto::feature::DigitalSignatureSigner as DigitalSignatureSignerFeature;
@@ -23,7 +24,6 @@ use crate::tspp::crypto::DigitalSignatureSigner;
 use crate::tspp::crypto::DigitalSignatureVerifier;
 use crate::tspp::crypto::Hash;
 use crate::tspp::crypto::HashAlgorithm;
-use crate::tspp::crypto::constant_time_eq;
 use crate::tspp::error::TsppError;
 use crate::tspp::error::TsppErrorCode;
 
@@ -453,23 +453,25 @@ impl TsppSocket {
                 let f: usize = frag.len() - Ed25519::SIGNATURE_LEN;
 
                 let mut m: [u8; 32 + Sha3256::MESSAGE_DIGEST_LEN] = [0; 32 + Sha3256::MESSAGE_DIGEST_LEN];
-                match self.role {
+                let n1: usize = match self.role {
                     TsppRole::ActiveOpener => {
                         m[..30].copy_from_slice("TSPPv1 active opener signature".as_bytes());
-                        m[30] = 0x00; // pad
-                        m[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                        m[30] = (31 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                        31
                     },
                     TsppRole::PassiveOpener => {
                         m[..31].copy_from_slice("TSPPv1 passive opener signature".as_bytes());
                         m[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                        32
                     }
-                }
+                };
+                let n2: usize = n1 + Sha3256::MESSAGE_DIGEST_LEN;
 
-                self.context_hash.update(&fb[..f])?.digest(&mut m[32..])?;
+                self.context_hash.update(&fb[..f])?.digest(&mut m[n1..n2])?;
 
                 Ed25519Signer::sign_oneshot(
                     &self.au_privkey_buf[..Ed25519::PRIVATE_KEY_LEN],
-                    &m[..],
+                    &m[..n2],
                     &mut frag.au_signature[..Ed25519::SIGNATURE_LEN]
                 )?;
 
@@ -527,23 +529,25 @@ impl TsppSocket {
                 };
 
                 let mut b: [u8; 32 + Sha3256::MESSAGE_DIGEST_LEN] = [0; 32 + Sha3256::MESSAGE_DIGEST_LEN];
-                match self.role {
+                let n1: usize = match self.role {
                     TsppRole::ActiveOpener => {
                         b[..31].copy_from_slice("TSPPv1 passive opener signature".as_bytes());
                         b[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                        32
                     },
                     TsppRole::PassiveOpener => {
                         b[..30].copy_from_slice("TSPPv1 active opener signature".as_bytes());
-                        b[30] = 0x00; // pad
-                        b[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                        b[30] = (31 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                        31
                     }
-                }
+                };
+                let n2: usize = n1 + Sha3256::MESSAGE_DIGEST_LEN;
 
-                self.context_hash.digest(&mut b[32..])?;
+                self.context_hash.digest(&mut b[n1..n2])?;
 
                 if !Ed25519Verifier::verify_oneshot(
                     &f.au_pubkey[..Ed25519::PUBLIC_KEY_LEN],
-                    &b[..],
+                    &b[..n2],
                     &buf[(r - Ed25519::SIGNATURE_LEN)..r]
                 )? {
                     // ERROR!: must be send by or finish stream
@@ -744,17 +748,11 @@ impl TsppSocket {
         return match self.cipher_suite {
             TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
 
-                let mut k: [u8; 32 + Sha3256::MESSAGE_DIGEST_LEN] = [0; 32 + Sha3256::MESSAGE_DIGEST_LEN];
+                let mut k: [u8; 26 + Sha3256::MESSAGE_DIGEST_LEN] = [0; 26 + Sha3256::MESSAGE_DIGEST_LEN];
                 k[..25].copy_from_slice("TSPPv1 hello phase secret".as_bytes());
-                k[25] = 0x00; // pad
-                k[26] = 0x00; // pad
-                k[27] = 0x00; // pad
-                k[28] = 0x00; // pad
-                k[29] = 0x00; // pad
-                k[30] = 0x00; // pad
-                k[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                k[25] = (26 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
 
-                self.context_hash.digest(&mut k[32..])?;
+                self.context_hash.digest(&mut k[26..])?;
 
                 HmacSha3256::new(&k[..])?
                     .update(&self.secret_buf[..HmacSha3256::MAC_LEN])?
@@ -804,17 +802,11 @@ impl TsppSocket {
         return match self.cipher_suite {
             TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
 
-                let mut k: [u8; 32 + Sha3256::MESSAGE_DIGEST_LEN] = [0; 32 + Sha3256::MESSAGE_DIGEST_LEN];
+                let mut k: [u8; 26 + Sha3256::MESSAGE_DIGEST_LEN] = [0; 26 + Sha3256::MESSAGE_DIGEST_LEN];
                 k[..25].copy_from_slice("TSPPv1 user stream secret".as_bytes());
-                k[25] = 0x00; // pad
-                k[26] = 0x00; // pad
-                k[27] = 0x00; // pad
-                k[28] = 0x00; // pad
-                k[29] = 0x00; // pad
-                k[30] = 0x00; // pad
-                k[31] = (32 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
+                k[25] = (26 + Sha3256::MESSAGE_DIGEST_LEN) as u8; // length
 
-                self.context_hash.digest(&mut k[32..])?;
+                self.context_hash.digest(&mut k[26..])?;
 
                 HmacSha3256::new(&k[..])?
                     .update(&self.secret_buf[..HmacSha3256::MAC_LEN])?
