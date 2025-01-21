@@ -9,25 +9,23 @@ use cryptopkg::crypto::ed25519::Ed25519;
 use cryptopkg::crypto::ed25519::Ed25519Signer;
 use cryptopkg::crypto::ed25519::Ed25519Verifier;
 use cryptopkg::crypto::hmac_sha3::HmacSha3256;
+use cryptopkg::crypto::rand::ChaCha20Rng;
 use cryptopkg::crypto::sha3::Sha3256;
 use cryptopkg::crypto::x25519::X25519;
-use rand_core::RngCore;
-use rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::sync::Mutex;
-use crate::net::crypto::Aead;
-use crate::net::crypto::AeadAlgorithm;
-use crate::net::crypto::DiffieHellmanAlgorithm;
-use crate::net::crypto::DigitalSignatureAlgorithm;
-use crate::net::crypto::DigitalSignatureSigner;
-use crate::net::crypto::DigitalSignatureVerifier;
-use crate::net::crypto::Hash;
-use crate::net::crypto::HashAlgorithm;
-use crate::net::crypto::constant_time_eq;
-use crate::net::error::TsppError;
-use crate::net::error::TsppErrorCode;
+use crate::tspp::crypto::Aead;
+use crate::tspp::crypto::AeadAlgorithm;
+use crate::tspp::crypto::DiffieHellmanAlgorithm;
+use crate::tspp::crypto::DigitalSignatureAlgorithm;
+use crate::tspp::crypto::DigitalSignatureSigner;
+use crate::tspp::crypto::DigitalSignatureVerifier;
+use crate::tspp::crypto::Hash;
+use crate::tspp::crypto::HashAlgorithm;
+use crate::tspp::crypto::constant_time_eq;
+use crate::tspp::error::TsppError;
+use crate::tspp::error::TsppErrorCode;
 
 const MAX_KE_PRIVATE_KEY_LEN: usize      = X25519::PRIVATE_KEY_LEN;
 const MAX_KE_PUBLIC_KEY_LEN: usize       = X25519::PUBLIC_KEY_LEN;
@@ -56,6 +54,7 @@ pub struct TsppSocket {
     context_hash: Hash,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum State {
     Initial,
     HelloSent,
@@ -68,40 +67,14 @@ enum State {
     Closed,
 }
 
-pub enum TsppRole {
-    ActiveOpener,
-    PassiveOpener,
-}
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TsppRole { ActiveOpener, PassiveOpener, }
 
-impl Clone for TsppRole {
-    fn clone(&self) -> Self { return *self; }
-}
-
-impl Copy for TsppRole {}
-
-impl PartialEq for TsppRole {
-    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
-}
-
-impl Eq for TsppRole {}
-
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TsppHelloPhaseState {
     InProgress,
     Done,
 }
-
-
-impl Clone for TsppHelloPhaseState {
-    fn clone(&self) -> Self { return *self; }
-}
-
-impl Copy for TsppHelloPhaseState {}
-
-impl PartialEq for TsppHelloPhaseState {
-    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
-}
-
-impl Eq for TsppHelloPhaseState {}
 
 impl State {
 
@@ -146,18 +119,6 @@ impl State {
     }
 
 }
-
-impl Clone for State {
-    fn clone(&self) -> Self { return *self; }
-}
-
-impl Copy for State {}
-
-impl PartialEq for State {
-    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
-}
-
-impl Eq for State {}
 
 static ENGINE: LazyLock<Mutex<TsppEngine>> = LazyLock::new(|| Mutex::new(TsppEngine::new()));
 
@@ -217,8 +178,8 @@ impl TsppSocket {
         };
 
         v.au_privkey_buf[..c.au_privkey_len].copy_from_slice(au_privkey);
-        let mut csprng: ChaCha20Rng = ChaCha20Rng::from_entropy();
-        csprng.fill_bytes(&mut v.ke_privkey_buf[..c.ke_privkey_len]);
+        let mut csprng: ChaCha20Rng = ChaCha20Rng::new()?;
+        csprng.fill_bytes(&mut v.ke_privkey_buf[..c.ke_privkey_len])?;
 
         return Ok(v);
 
@@ -466,8 +427,8 @@ impl TsppSocket {
             au_signature: [0; 64]
         };
 
-        let mut csprng: ChaCha20Rng = ChaCha20Rng::from_entropy();
-        csprng.fill_bytes(&mut frag.random[..]);
+        let mut csprng: ChaCha20Rng = ChaCha20Rng::new()?;
+        csprng.fill_bytes(&mut frag.random[..])?;
 
         match self.cipher_suite {
             TsppCipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256 => {
@@ -977,26 +938,7 @@ impl TsppSocket {
 
 }
 
-
-
-
-
-
-// struct Secrets {
-//
-//
-//
-// }
-//
-// impl Secrets {
-//     fn forget() {}
-// }
-
-trait Serializable {
-    fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> where Self: Sized;
-    fn to_bytes(&self, buf: &mut [u8]) -> Result<(), TsppError>;
-}
-
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FragmentType {
     Hello             = 0x00,
     HelloDone         = 0x01,
@@ -1030,18 +972,7 @@ impl FragmentType {
 
 }
 
-impl Clone for FragmentType {
-    fn clone(&self) -> Self { return *self; }
-}
-
-impl Copy for FragmentType {}
-
-impl PartialEq for FragmentType {
-    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
-}
-
-impl Eq for FragmentType {}
-
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TsppVersion {
     Null     = 0x00000000,
     Version1 = 0x00000001,
@@ -1072,22 +1003,6 @@ impl TsppVersion {
             },
         };
     }
-
-}
-
-impl Clone for TsppVersion {
-    fn clone(&self) -> Self { return *self; }
-}
-
-impl Copy for TsppVersion {}
-
-impl PartialEq for TsppVersion {
-    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
-}
-
-impl Eq for TsppVersion {}
-
-impl Serializable for TsppVersion {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
@@ -1123,6 +1038,7 @@ impl Serializable for TsppVersion {
 }
 
 #[allow(non_camel_case_types)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TsppCipherSuite {
     NULL_NULL_NULL_NULL                 = 0x0000000000000000,
     X25519_Ed25519_AES_128_GCM_SHA3_256 = 0x0000000000000001,
@@ -1146,22 +1062,6 @@ impl TsppCipherSuite {
             Self::X25519_Ed25519_AES_128_GCM_SHA3_256 => 0x0000000000000001,
         };
     }
-
-}
-
-impl Clone for TsppCipherSuite {
-    fn clone(&self) -> Self { return *self; }
-}
-
-impl Copy for TsppCipherSuite {}
-
-impl PartialEq for TsppCipherSuite {
-    fn eq(&self, other: &Self) -> bool { return *self as usize == *other as usize; }
-}
-
-impl Eq for TsppCipherSuite {}
-
-impl Serializable for TsppCipherSuite {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
@@ -1265,10 +1165,6 @@ impl FragmentHeader {
 
     }
 
-}
-
-impl Serializable for FragmentHeader {
-
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
         if buf.len() < Self::BYTES_LEN {
@@ -1312,13 +1208,9 @@ struct HelloFragment {
 
 impl HelloFragment {
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         return FragmentHeader::BYTES_LEN + (self.base.length as usize);
     }
-
-}
-
-impl Serializable for HelloFragment {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
@@ -1399,13 +1291,9 @@ struct HelloDoneFragment {
 
 impl HelloDoneFragment {
 
-    pub fn len(&self) -> usize {
+    fn len(&self) -> usize {
         return FragmentHeader::BYTES_LEN + (self.base.length as usize);
     }
-
-}
-
-impl Serializable for HelloDoneFragment {
 
     fn from_bytes(buf: &[u8]) -> Result<Self, TsppError> {
 
@@ -1506,23 +1394,6 @@ impl TsppCipherSuite {
         };
     }
 
-    /*
-
-    やっぱこれ、utilのAeadとかを使うんじゃなくて、tspp::crypto::TsppAeadとかを作って
-    それをCipherSuiteからアクセスできるようにmanagedにしたほうがいい（たとえば、Aes192Gcmとかってあんま使わんやろうから）。
-
-    んで、let algo = TsppAeadAlgorhitm::Aes128Gcm;
-    let aead = algo.new_instance()とかにしたり、
-
-    let cs = CipherSuite::X25519_Ed25519_AES_128_GCM_SHA3_256;
-    cs.new_aead() {
-        algo.new_instance()
-    }
-
-    とかしたほうがいい
-
-    */
-
     fn algorithms(&self) ->
         Result<(DiffieHellmanAlgorithm, DigitalSignatureAlgorithm, AeadAlgorithm, HashAlgorithm), TsppError> {
         return match self {
@@ -1569,5 +1440,3 @@ impl TsppCipherSuite {
     }
 
 }
-
-// markers

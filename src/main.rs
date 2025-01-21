@@ -1,5 +1,5 @@
 #[allow(dead_code)]
-mod net;
+mod tspp;
 
 mod test_script;
 

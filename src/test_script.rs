@@ -1,12 +1,12 @@
-use crate::net::tspp::TsppCipherSuite;
-use crate::net::tspp::TsppEngine;
-use crate::net::tspp::TsppSocket;
-use crate::net::tspp::TsppHelloPhaseState;
-use crate::net::tspp::TsppRole;
-use crate::net::tspp::TsppVersion;
-use crate::net::crypto::DigitalSignatureAlgorithm;
-use crate::net::util::TsppProtectedTcpListener;
-use crate::net::util::TsppProtectedTcpStream;
+use crate::tspp::tspp::TsppCipherSuite;
+use crate::tspp::tspp::TsppEngine;
+use crate::tspp::tspp::TsppSocket;
+use crate::tspp::tspp::TsppHelloPhaseState;
+use crate::tspp::tspp::TsppRole;
+use crate::tspp::tspp::TsppVersion;
+use crate::tspp::crypto::DigitalSignatureAlgorithm;
+use crate::tspp::util::TsppProtectedTcpListener;
+use crate::tspp::util::TsppProtectedTcpStream;
 use std::thread;
 
 pub fn main() {
