@@ -71,11 +71,10 @@ impl From<CryptoError> for TsppError {
 
 impl Display for TsppError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let e: CryptoErrorCode = self.crypto_err_code.unwrap();
         return write!(f, "TsppError: {}", match &self.err_code {
             TsppErrorCode::Unknown                      => "unknown",
             TsppErrorCode::IllegalArgument              => "illegal argument",
-            TsppErrorCode::CryptoErrorOccurred          => e.to_str(),
+            TsppErrorCode::CryptoErrorOccurred          => "some crypto error",
             TsppErrorCode::UnsupportedAlgorithm         => "unsupported algorithm",
             TsppErrorCode::UnsupportedCipherSuite       => "unsupported cipher suite",
             TsppErrorCode::UnsupportedFragmentType      => "unsupported fragment type",
