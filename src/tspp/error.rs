@@ -75,7 +75,7 @@ impl Display for TsppError {
         return write!(f, "TsppError: {}", match &self.err_code {
             TsppErrorCode::Unknown                      => "unknown",
             TsppErrorCode::IllegalArgument              => "illegal argument",
-            TsppErrorCode::CryptoErrorOccurred          => format!("crypto error: {}", e.to_str()).as_str(),
+            TsppErrorCode::CryptoErrorOccurred          => e.to_str(),
             TsppErrorCode::UnsupportedAlgorithm         => "unsupported algorithm",
             TsppErrorCode::UnsupportedCipherSuite       => "unsupported cipher suite",
             TsppErrorCode::UnsupportedFragmentType      => "unsupported fragment type",

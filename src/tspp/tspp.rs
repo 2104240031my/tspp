@@ -545,7 +545,7 @@ impl TsppSocket {
 
                 self.context_hash.digest(&mut b[n1..n2])?;
 
-                if Err(_) = Ed25519Verifier::verify_oneshot(
+                if let Err(_) = Ed25519Verifier::verify_oneshot(
                     &f.au_pubkey[..Ed25519::PUBLIC_KEY_LEN],
                     &b[..n2],
                     &buf[(r - Ed25519::SIGNATURE_LEN)..r]
@@ -915,13 +915,15 @@ impl TsppSocket {
             _ => return Err(TsppError::new(TsppErrorCode::IllegalCipherSuite))
         };
 
-        let v: bool = self.recv_aead.decrypt_and_verify(
+        let Ok(v) = self.recv_aead.decrypt_and_verify(
             &nonce[..nonce_len],
             aad,
             ciphertext,
             plaintext,
             tag
-        )?;
+        ) else {
+            return Err(TsppError::new(TsppErrorCode::AeadDecryptionFailed))
+        };
 
         self.recv_frag_ctr = self.recv_frag_ctr + 1;
         return Ok(v);
