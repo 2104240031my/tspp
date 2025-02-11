@@ -545,11 +545,11 @@ impl TsppSocket {
 
                 self.context_hash.digest(&mut b[n1..n2])?;
 
-                if !Ed25519Verifier::verify_oneshot(
+                if Err(_) = Ed25519Verifier::verify_oneshot(
                     &f.au_pubkey[..Ed25519::PUBLIC_KEY_LEN],
                     &b[..n2],
                     &buf[(r - Ed25519::SIGNATURE_LEN)..r]
-                )? {
+                ) {
                     // ERROR!: must be send by or finish stream
                     return Err(TsppError::new(TsppErrorCode::PeerAuthFailed));
                 }
